@@ -4,13 +4,23 @@ extends EditorPlugin
 var dock : Control
 
 func _enter_tree() -> void:
-	#laod custom ui scene
-	dock =  preload("res://addons/Talos_local/Talos_dock.tscn").instantiate()
-	# add the control to the left hand dock slot
-	add_control_to_dock(EditorPlugin.DOCK_SLOT_LEFT_BR, dock)
+	#load custom ui scene
+	if not ResourceLoader.exists("res://addons/Talos_local/TTalos_dock.tscn"):
+		push_error("Talos Error: cannot find Talos_dock.tscn! Check your folder names")
+		return
+	var dock_scene =  preload("res://addons/Talos_local/Talos_dock.tscn")
+	dock = dock_scene.instantiate()
+	
+	if dock:
+		add_control_to_dock(DOCK_SLOT_RIGHT_BL, dock)
+		print("Talos dock suceesfully added to the editor panel!")
+	else:
+		push_error("Talos error: fails to instantiate the dock scene.")
+	
 	
 
 
 func _exit_tree() -> void:
-	remove_control_from_docks(dock)
-	dock.queue_free()
+	if dock:
+		remove_control_from_docks(dock)
+		dock.queue_free()
