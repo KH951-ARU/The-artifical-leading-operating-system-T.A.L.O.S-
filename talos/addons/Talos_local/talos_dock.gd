@@ -21,7 +21,7 @@ func _on_send_button_pressed() -> void:
 	
 	#system prompt to stay with in Godot 4.4 documentation
 	var  system_prompt = ("You are T.A.L.O.S , a local computational system. Generate clean , vaild godot 4.4 GDscript. " +
-	"Use modern features like @export, character2D, and lambda functions." +
+	"Use modern features described in the godot 4.4 documentation with commnets" +
 	"Provide only raw, function code without introductory small talk.")
 	
 	# formulate the payload according to the api schema

@@ -15,6 +15,7 @@ offset_bottom = 644.0
 alignment = 1
 
 [node name="TextEdit" type="TextEdit" parent="VBoxContainer"]
+custom_minimum_size = Vector2(1000, 500)
 layout_mode = 2
 
 [node name="LineEdit" type="LineEdit" parent="VBoxContainer"]
