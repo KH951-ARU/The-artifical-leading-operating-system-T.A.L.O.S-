@@ -32,6 +32,22 @@ func _on_send_button_pressed() -> void:
 		"stream": false # returns on ecomplete package instead of streaming chunks
 		}
 		
-		var headers = ["content-type: application/json"]
-		http_node.request(OLLAMA_URL,headers,HTTPClient.METHOD_POST , JSON.stringify(body))
+	var headers = ["content-type: application/json"]
+	http_node.request(OLLAMA_URL,headers,HTTPClient.METHOD_POST , JSON.stringify(body))
 		
+
+func _on_TALOS_response(result: int, responce_code: int , header: PackedStringArray, body: PackedByteArray) -> void:
+	if responce_code != 200:
+		output_box.text = " error connecting to local Ollama server.Ensure it's runnning!
+		Talos is depowered for the moment"
+		return
+	var json = JSON.new()
+	var error = json.parse(body.get_string_from_utf8())
+	if error == OK:
+		var response_data = json.get_data()
+		if response_data.has("response"):
+			var ai_code = response_data["response"]
+			output_box.text = ai_code
+			#added to clipboard instantly for pating upon call
+			DisplayServer.clipboard_set(ai_code)
+	
