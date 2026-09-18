@@ -145,6 +145,26 @@ func _on_model_selected(index : int) -> void:
 	status_label.text = "Status: Switched to " + selected_model_name
 	_set_status_color(Color(0.2,0.7,0.9))
 
+func _write_to_offine_cache( hash_signature : String, code_content: String) -> void:
+	if hash_signature == "" or code_content.strip_edges() == "": return
+	var path = CACHE_DIR + hash_signature + ".cache"
+	var file = FileAccess.open(path, FileAccess.WRITE)
+	if file:
+		file.store_string(code_content)
+		file.close()
+
+func _read_from_offline_cache(hash_signature: String) -> String:
+	var path = CACHE_DIR + hash_signature + ".cache"
+	if not FileAccess.file_exists(path):
+		return ""
+	
+	var file = FileAccess.open(path, FileAccess.READ)
+	if file:
+		var contents = file.get_as_text()
+		file.close()
+		return contents
+	return ""
+
 func _load_local_xml_docs(class_name_str : String) -> String:
 	var doc_context = ""
 	var file_path = LOCAL_XML_DOCS_PATH + class_name_str.to_lower() + ".xml"
@@ -209,7 +229,7 @@ func _on_send_button_pressed() -> void:
 	output_box.text = "Talos is forging . . ."
 	input_line.clear()
 	
-	progression_bar.value = 0 
+	progression_bar.value = 0
 	progression_timer.start()
 	send_button.disabled = true
 	cancel_button.disabled = false
@@ -242,7 +262,6 @@ func _on_send_button_pressed() -> void:
 func _on_cancel_button_pressed() -> void:
 	if http_node.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
 		http_node.cancel()
-	
 	progression_timer.stop()
 	progression_bar.value = 0
 	send_button.disabled = false
@@ -251,7 +270,7 @@ func _on_cancel_button_pressed() -> void:
 	status_label.text = "Status: Aborted"
 	_set_status_color(Color(0.9,0.6,0.2))
 
-func _on_http_routing_coordinator(result: int, responce_code: int, header : PackedStringArray, body : PackedByteArray) -> void:
+func _on_http_routing_coordinator(result: int, response_code: int, header : PackedStringArray, body : PackedByteArray) -> void:
 	if send_button.disabled and not model_select_menu.disabled:
 		pass
 	
@@ -264,7 +283,7 @@ func _on_http_routing_coordinator(result: int, responce_code: int, header : Pack
 			_process_tags_response(response_code,parsed)
 		return
 		
-		_handle_generation_response(responce_code, body)
+		_handle_generation_response(response_code, body)
 
 func _process_tags_response(response_code : int, data : Dictionary) -> void:
 	if response_code != 200:
@@ -292,16 +311,21 @@ func _handle_generation_response(response_code : int , body: PackedByteArray) ->
 	model_select_menu.disabled = false
 	
 	if response_code != 200:
-		progression_bar.value = 0
-		if output_box.text != "Forging process Aborted by user. T.A.L.O.S stands down.":
-			output_box.text = "Error connecting to local ollama server. Ensure it's running!"
-			status_label.text = "Status: HTTP Connection Error (%d)" % response_code
-			_set_status_color(Color(0.9,0.2,0.2))
-			return
-	
+		if output_box.text != "Forging Process Aborted by User. T.A.L.O.S stands down.":
+			_execute_offline_fallback_fallback_procedure("Server Response Code %d" % response_code)
+		else:
+			progression_timer.stop()
+			send_button.disabled = false
+			cancel_button.disabled = true
+			model_select_menu.disabled = false
+		return
+	progression_timer.stop()
+	send_button.disabled = false
+	cancel_button.disabled = true
+	model_select_menu.disabled = false
 	progression_bar.value = progression_bar.max_value
 	status_label.text = "Status: Computation Complete"
-	_set_status_color(Color(0.1,0.8,0.5))
+	_set_status_color(Color(0.1, 0.8, 0.5))
 	
 	var json = JSON.new()
 	if json.parse(body.get_string_from_utf8()) == OK:
@@ -310,10 +334,33 @@ func _handle_generation_response(response_code : int , body: PackedByteArray) ->
 			var ai_raw_response = response_data["response"]
 			var clean_code = _extract_code_blocks(ai_raw_response)
 			output_box.text = clean_code
+			_write_to_offine_cache(running_request_hash, clean_code)
 			DisplayServer.clipboard_set(clean_code)
 			
 			if auto_insert_checkbox.button_pressed:
 				_insert_code_into_active_editor(clean_code)
+
+func _execute_offline_fallback_fallback_procedure(reason_str: String) -> void:
+	progression_timer.stop()
+	send_button.disabled = false
+	cancel_button.disabled = true
+	model_select_menu.disabled = false
+	
+	var cached_script = _read_from_offline_cache(running_request_hash)
+	if cached_script != "":
+		progression_bar.value = progression_bar.max_value
+		output_box.text = cached_script
+		DisplayServer.clipboard_set(cached_script)
+		status_label.text = "Status: Offline Fallback Resolved (Fetched From Cache)"
+		_set_status_color(Color(0.0, 0.75, 0.85)) # Distinct Cyan color for database lookup
+		
+		if auto_insert_checkbox.button_pressed:
+			_insert_code_into_active_editor(cached_script)
+	else:
+		progression_bar.value = 0
+		output_box.text = "Error: Ollama Host Unreachable (%s).\nNo matching compiled historical modules found in offline database cache." % reason_str
+		status_label.text = "Status: Core Offline & Cache Miss"
+		_set_status_color(Color(0.9, 0.2, 0.2))
 
 func _extract_code_blocks(raw_input : String) -> String:
 	if not "```" in raw_input:
@@ -334,7 +381,6 @@ func _extract_code_blocks(raw_input : String) -> String:
 func _insert_code_into_active_editor(code_to_insert: String) -> void:
 	var script_editor = EditorInterface.get_script_editor()
 	var base_editor = script_editor.get_current_editor()
-	
 	if base_editor:
 		var text_edits = base_editor.find_children("*", "TextEdit", true, false)
 		if text_edits.size() > 0 and text_edits[0] is TextEdit:
