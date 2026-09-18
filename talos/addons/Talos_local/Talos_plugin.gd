@@ -5,14 +5,20 @@ var dock : VBoxContainer
 var output_box : TextEdit
 var input_line : LineEdit
 var send_button : Button
+var cancel_button : Button
 var auto_insert_checkbox : CheckBox
 var http_node: HTTPRequest
+var model_select_menu : OptionButton
+var status_label : Label
 var progression_bar : ProgressBar
 var progression_timer :Timer
 
 const OLLAMA_URL = "http://localhost:11434/api/generate"
-const MODEL_NAME = "qwen2.5-coder:3b"
+const OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
+var selected_model_name = "qwen2.5-coder:3b"
 const LOCAL_XML_DOCS_PATH = "res://doc_classes/"
+const CACHE_DIR = "user://Talos_cache/"
+var running_request_hash = ""
 
 func _enter_tree() -> void:
 	dock = VBoxContainer.new()
@@ -36,6 +42,34 @@ func _enter_tree() -> void:
 	progression_bar.custom_minimum_size = Vector2(0, 16)
 	_apply_segmented_style(progression_bar)
 	
+	var model_box = HBoxContainer.new()
+	var model_label = Label.new()
+	model_label.text = "Model: "
+	model_select_menu = OptionButton.new()
+	model_select_menu.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	model_select_menu.add_item(selected_model_name)
+	model_select_menu.item_selected.connect(_on_model_selected)
+	model_box.add_child(model_label)
+	model_box.add_child(model_select_menu)
+	
+	var button_box = HBoxContainer.new()
+	send_button = Button.new()
+	send_button.text = "offer to T.A.L.O.S"
+	send_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	
+	cancel_button = Button.new()
+	cancel_button.text = "ABORT Forging"
+	cancel_button.disabled = true
+	
+	button_box.add_child(send_button)
+	button_box.add_child(cancel_button)
+	
+	status_label = Label.new()
+	status_label.text = "Status: IDLE"
+	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_set_status_color(Color(0.6 ,0.6 ,0.6))
+	
 	progression_timer = Timer.new()
 	progression_timer.wait_time = 0.15
 	progression_timer.one_shot = false
@@ -47,22 +81,28 @@ func _enter_tree() -> void:
 	input_line = LineEdit.new()
 	input_line.placeholder_text = "Request a offering to T.A.L.O.S for a creation"
 	
-	send_button = Button.new()
-	send_button.text = "offer to T.A.L.O.S"
-	
 	http_node = HTTPRequest.new()
 	
+	#ui assembly hierarchy
 	dock.add_child(output_box)
+	dock.add_child(progression_bar)
+	dock.add_child(model_box)
+	dock.add_child(button_box)
+	dock.add_child(status_label)
 	dock.add_child(auto_insert_checkbox)
 	dock.add_child(input_line)
-	dock.add_child(send_button)
 	dock.add_child(http_node)
+	dock.add_child(progression_timer)
 	
 	send_button.pressed.connect(_on_send_button_pressed)
-	http_node.request_completed.connect(_on_TALOS_response)
+	cancel_button.pressed.connect(_on_cancel_button_pressed)
+	http_node.request_completed.connect(_on_http_routing_coordinator)
+	progression_timer.timeout.connect(_on_progress_tick)
 	
 	add_control_to_dock(EditorPlugin.DOCK_SLOT_RIGHT_BR, dock)
 	print("talos ui forced into editor successfully.")
+	
+	_fetch_local_ollama_models()
 
 func _exit_tree() -> void:
 	if dock:
@@ -71,13 +111,39 @@ func _exit_tree() -> void:
 
 func _apply_segmented_style(bar : ProgressBar) -> void:
 	var bg_style = StyleBoxFlat.new()
-	bg_style.bg_color = Color(0.12, 0.12, 0.12)
-	bg_style.corner_radius_top_left = 3
-	bg_style.corner_radius_bottom_left = 3
-	bg_style.corner_radius_top_right = 3
-	bg_style.corner_radius_bottom_right = 3
+	bg_style.bg_color = Color(0.08, 0.08, 0.1,0.1)
+	bg_style.corner_radius_top_left = 4
+	bg_style.corner_radius_bottom_left = 4
+	bg_style.corner_radius_top_right = 4
+	bg_style.corner_radius_bottom_right = 4
 	
-	var fg_style
+	var fg_style = StyleBoxFlat.new()
+	fg_style.bg_color = Color(0.15,0.15,0.15)
+	fg_style.border_width_right = 2
+	fg_style.border_color = Color(0.1,0.1,0.1)
+	fg_style.corner_radius_top_left = 2
+	fg_style.corner_radius_bottom_left = 2
+	
+	bar.add_theme_stylebox_override("background", bg_style)
+	bar.add_theme_stylebox_override("fill", fg_style)
+
+func _set_status_color(color : Color) -> void:
+	status_label.add_theme_color_override("font_color", color)
+
+func _on_progress_tick() -> void:
+	if progression_bar.value >= progression_bar.max_value:
+		progression_bar.value = 0
+	else:
+		progression_bar.value += progression_bar.step
+
+func _fetch_local_ollama_models() -> void:
+	status_label.text = "Status: Querying host models..."
+	_set_status_color(Color(0.9,0.3,0.3))
+
+func _on_model_selected(index : int) -> void:
+	selected_model_name = model_select_menu.get_item_text(index)
+	status_label.text = "Status: Switched to " + selected_model_name
+	_set_status_color(Color(0.2,0.7,0.9))
 
 func _load_local_xml_docs(class_name_str : String) -> String:
 	var doc_context = ""
@@ -143,6 +209,11 @@ func _on_send_button_pressed() -> void:
 	output_box.text = "Talos is forging . . ."
 	input_line.clear()
 	
+	progression_bar.value = 0 
+	progression_timer.start()
+	send_button.disabled = true
+	cancel_button.disabled = false
+	
 	var project_context = _get_editor_context()
 	
 	var system_prompt = (
@@ -156,7 +227,7 @@ func _on_send_button_pressed() -> void:
 	
 	# BUG FIX: Change user_prompt to combined_prompt to send context to Ollama
 	var body = {
-		"model": MODEL_NAME,
+		"model": selected_model_name,
 		"prompt": combined_prompt,
 		"system": system_prompt,
 		"stream": false,
@@ -168,11 +239,69 @@ func _on_send_button_pressed() -> void:
 	var headers = ["content-type: application/json"]
 	http_node.request(OLLAMA_URL, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
 
-func _on_TALOS_response(result: int, response_code: int, header: PackedStringArray, body: PackedByteArray) -> void:
-	# BUG FIX: Fixed spelling typo 'responce_code' and multi-line formatting syntax error
-	if response_code != 200:
-		output_box.text = "Error connecting to local Ollama server. Ensure it's running!\nTalos is depowered for the moment."
+func _on_cancel_button_pressed() -> void:
+	if http_node.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
+		http_node.cancel()
+	
+	progression_timer.stop()
+	progression_bar.value = 0
+	send_button.disabled = false
+	cancel_button.disabled = true
+	output_box.text = "Forging Process Aborted by User. T.A.L.O.S stands down."
+	status_label.text = "Status: Aborted"
+	_set_status_color(Color(0.9,0.6,0.2))
+
+func _on_http_routing_coordinator(result: int, responce_code: int, header : PackedStringArray, body : PackedByteArray) -> void:
+	if send_button.disabled and not model_select_menu.disabled:
+		pass
+	
+	var raw_str = body.get_string_from_utf8()
+	var json = JSON.new()
+	
+	if json.parse(raw_str) == OK:
+		var parsed = json.get_data()
+		if parsed is Dictionary and parsed.has("models"):
+			_process_tags_response(response_code,parsed)
 		return
+		
+		_handle_generation_response(responce_code, body)
+
+func _process_tags_response(response_code : int, data : Dictionary) -> void:
+	if response_code != 200:
+		status_label.text = "Status: failed to retrieve models "
+		_set_status_color(Color(0.9,0.3,0.3))
+		return
+	
+	model_select_menu.clear()
+	var models_list = data["models"]
+	
+	for m in models_list:
+		if m.has("name"):
+			model_select_menu.add_item(m["name"])
+			
+	if model_select_menu.item_count > 0:
+		model_select_menu.select(0)
+		selected_model_name = model_select_menu.get_item_text(0)
+		status_label.text = "Status: ready (" + selected_model_name + ")"
+		_set_status_color(Color(0.2,0.8,0.3))
+
+func _handle_generation_response(response_code : int , body: PackedByteArray) -> void:
+	progression_timer.stop()
+	send_button.disabled = false
+	cancel_button.disabled = true
+	model_select_menu.disabled = false
+	
+	if response_code != 200:
+		progression_bar.value = 0
+		if output_box.text != "Forging process Aborted by user. T.A.L.O.S stands down.":
+			output_box.text = "Error connecting to local ollama server. Ensure it's running!"
+			status_label.text = "Status: HTTP Connection Error (%d)" % response_code
+			_set_status_color(Color(0.9,0.2,0.2))
+			return
+	
+	progression_bar.value = progression_bar.max_value
+	status_label.text = "Status: Computation Complete"
+	_set_status_color(Color(0.1,0.8,0.5))
 	
 	var json = JSON.new()
 	if json.parse(body.get_string_from_utf8()) == OK:
