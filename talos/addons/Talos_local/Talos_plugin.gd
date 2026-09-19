@@ -18,7 +18,10 @@ const OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 var selected_model_name = "qwen2.5-coder:3b"
 const LOCAL_XML_DOCS_PATH = "res://doc_classes/"
 const CACHE_DIR = "user://Talos_cache/"
+const SETTING_SHORCUT = "plugins/talos/shortcut_key"
+
 var running_request_hash = ""
+
 
 func _enter_tree() -> void:
 	dock = VBoxContainer.new()
@@ -109,6 +112,34 @@ func _exit_tree() -> void:
 		remove_control_from_docks(dock)
 		dock.queue_free()
 
+func _init_editor_setting_configs() -> void:
+	if not ProjectSettings.has_setting(SETTING_SHORCUT):
+		ProjectSettings.set_setting(SETTING_SHORCUT, "T")
+		ProjectSettings.set_initial_value(SETTING_SHORCUT, "T")
+	
+	var property_info = {
+		"name": SETTING_SHORCUT,
+		"type": TYPE_STRING,
+		"hint":PROPERTY_HINT_NONE,
+		"hint_string": "The alpha key triggered alongside Ctrl+Shift+T"
+	}
+	ProjectSettings.add_property_info(property_info)
+	ProjectSettings.save()
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed:
+		var configured_key = ProjectSettings.get_setting(SETTING_SHORCUT , "T").to_upper()
+		var target_keycode = OS.find_keycode_from_string(configured_key)
+		
+		if  event.ctrl_pressed and event.shift_pressed and event.keycode == target_keycode:
+			if not send_button.disabled:
+				get_viewport().set_input_as_handled()
+				_on_send_button_pressed()
+
+func _init_cache_directory() -> void:
+	if not DirAccess.dir_exists_absolute(CACHE_DIR):
+		DirAccess.make_dir_absolute(CACHE_DIR) 
+
 func _apply_segmented_style(bar : ProgressBar) -> void:
 	var bg_style = StyleBoxFlat.new()
 	bg_style.bg_color = Color(0.08, 0.08, 0.1,0.1)
@@ -165,6 +196,21 @@ func _read_from_offline_cache(hash_signature: String) -> String:
 		return contents
 	return ""
 
+func _on_clear_cache_pressed() -> void:
+	var dir = DirAccess.open(CACHE_DIR)
+	if dir:
+		dir.list_dir_begin()
+		var file_name = dir.get_next()
+		var count = 0
+		while file_name != "":
+			if  not dir.current_is_dir() and file_name.ends_with(".cache"):
+				dir.remove(file_name)
+				count += 1
+			file_name = dir.get_next()
+		
+		status_label.text = "Status: Purged %d Cached Files Successfully" % count
+		_set_status_color(Color(0.9,0.3,0.3))
+		
 func _load_local_xml_docs(class_name_str : String) -> String:
 	var doc_context = ""
 	var file_path = LOCAL_XML_DOCS_PATH + class_name_str.to_lower() + ".xml"
@@ -199,6 +245,26 @@ func _load_local_xml_docs(class_name_str : String) -> String:
 		file.close()
 	return doc_context 
 
+func _get_deep_scene_context() -> String:
+	var scene_context = ""
+	var scene_root = EditorInterface.get_edited_scene_root()
+	
+	var children = scene_root.find_children("*","", true, false)
+	for child in children:
+		scene_context += "-> Node Path Element: %s (Type: %S)\n" % [scene_root.get_path_to(child),child.get_class()]
+		var script = child.get_script()
+		if script and script is Script:
+			scene_context += "[Attached Script Content Found]: %s\n" % script.resource_path
+			var lines =  script.source_code.split("\n")
+			var line_count = 0 
+			for line in lines:
+				if line_count > 15:break
+				if line.begins_with("var") or line.begins_with("signal") or line.begins_with("func"):
+					scene_context += "| %s\n" % line.strip_edges()
+					line_count += 1
+			return scene_context
+			
+
 func _get_editor_context() -> String:
 	var context = ""
 	var script_editor = EditorInterface.get_script_editor()
@@ -220,6 +286,7 @@ func _get_editor_context() -> String:
 			if not method["name"].begin_with("_") or method["name"] in ["_ready","_process","_physics_process"]:
 				context += "Native Method: %s()\n" % method["name"]
 				method_count += 1 
+				context += _get_deep_scene_context()
 	return context
 
 func _on_send_button_pressed() -> void:
