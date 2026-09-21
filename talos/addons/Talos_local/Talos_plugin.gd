@@ -291,76 +291,92 @@ func _get_editor_context() -> String:
 
 func _on_send_button_pressed() -> void:
 	var user_prompt = input_line.text.strip_edges()
-	if user_prompt == "": return
-	
+	if user_prompt == "":
+		var script_editor = EditorInterface.get_script_editor()
+		var base_editor = script_editor.get_current_editor()
+		if base_editor:
+			var text_edits = base_editor.find_children("*", "TextEdit", true, false)
+			if text_edits.size() > 0 and text_edits[0] is TextEdit:
+				var target_edit : TextEdit = text_edits[0] as TextEdit
+				if target_edit.has_selection():
+					user_prompt = target_edit.get_selected_text().strip_edges()
+					
+	if user_prompt == "":
+		if status_label:
+			status_label.text = "Status: Prompt Blank (Write text or select script block)"
+		_set_status_color(Color(0.9, 0.4, 0.4))
+		return
+		
 	output_box.text = "Talos is forging . . ."
 	input_line.clear()
+	if status_label:
+		status_label.text = "Status: Forging code structure..."
+	_set_status_color(Color(0.2, 0.8, 0.5))
 	
-	progression_bar.value = 0
-	progression_timer.start()
-	send_button.disabled = true
-	cancel_button.disabled = false
+	if progression_bar: progression_bar.value = 0
+	if progression_timer: progression_timer.start()
+	if send_button: send_button.disabled = true
+	if cancel_button: cancel_button.disabled = false
+	if clear_cache_button: clear_cache_button.disabled = true
+	if model_select_menu: model_select_menu.disabled = true
 	
 	var project_context = _get_editor_context()
-	
 	var system_prompt = (
-		"You are T.A.L.O.S , a local computational system. You are a strict Godot 4.4 engine expert that explains thoroughly. " +
-		"Use the provided active script structure and ClassDB documentation context below to answer. " +
-		"Never hallucinate methods. Match the variables, node names, and structural architecture explicitly provided. " +
-		"Return only clean code blocks."
+		"You are T.A.L.O.S , a local computational system. You are a strict Godot 4.4 engine expert that explains thoroughly. " 
+		+ "Use the provided active script structure and ClassDB documentation context below to answer. " 
+		+ "Never hallucinate methods. Match the variables, node names, and structural architecture explicitly provided. " 
+		+ "Return only clean code blocks."
 	)
-	
 	var combined_prompt = "CONTEXT Strings:\n" + project_context + "\n\nUSER REQUEST: " + user_prompt
+	running_request_hash = "".md5_text(combined_prompt + "_" + selected_model_name)
 	
-	# BUG FIX: Change user_prompt to combined_prompt to send context to Ollama
 	var body = {
 		"model": selected_model_name,
 		"prompt": combined_prompt,
 		"system": system_prompt,
 		"stream": false,
-		"options": {
-			"temperature": 0.1
-		}
+		"options": { "temperature": 0.1 }
 	}
-		
 	var headers = ["content-type: application/json"]
-	http_node.request(OLLAMA_URL, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
+	
+	var request_err = http_node.request(OLLAMA_URL, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
+	if request_err != OK:
+		_execute_offline_fallback_procedure("HTTP Engine Request Failure")
 
 func _on_cancel_button_pressed() -> void:
 	if http_node.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
 		http_node.cancel()
-	progression_timer.stop()
-	progression_bar.value = 0
-	send_button.disabled = false
-	cancel_button.disabled = true
+	if progression_timer: progression_timer.stop()
+	if progression_bar: progression_bar.value = 0
+	if send_button: send_button.disabled = false
+	if cancel_button: cancel_button.disabled = true
+	if clear_cache_button: clear_cache_button.disabled = false
+	if model_select_menu: model_select_menu.disabled = false
 	output_box.text = "Forging Process Aborted by User. T.A.L.O.S stands down."
-	status_label.text = "Status: Aborted"
-	_set_status_color(Color(0.9,0.6,0.2))
+	if status_label:
+		status_label.text = "Status: Aborted"
+	_set_status_color(Color(0.9, 0.6, 0.2))
 
-func _on_http_routing_coordinator(result: int, response_code: int, header : PackedStringArray, body : PackedByteArray) -> void:
-	if send_button.disabled and not model_select_menu.disabled:
-		pass
-	
+func _on_http_routing_coordinator(result: int, response_code: int, header: PackedStringArray, body: PackedByteArray) -> void:
 	var raw_str = body.get_string_from_utf8()
 	var json = JSON.new()
-	
 	if json.parse(raw_str) == OK:
 		var parsed = json.get_data()
 		if parsed is Dictionary and parsed.has("models"):
-			_process_tags_response(response_code,parsed)
+			_process_tags_response(response_code, parsed)
+			return
+			
+	_handle_generation_response(response_code, body)
+
+func _process_tags_response(response_code: int, data: Dictionary) -> void:
+	if not status_label or not model_select_menu: return
+	if response_code != 200:
+		status_label.text = "Status: Using Default Model Configuration Only"
+		_set_status_color(Color(0.9, 0.5, 0.2))
 		return
 		
-		_handle_generation_response(response_code, body)
-
-func _process_tags_response(response_code : int, data : Dictionary) -> void:
-	if response_code != 200:
-		status_label.text = "Status: failed to retrieve models "
-		_set_status_color(Color(0.9,0.3,0.3))
-		return
-	
 	model_select_menu.clear()
 	var models_list = data["models"]
-	
 	for m in models_list:
 		if m.has("name"):
 			model_select_menu.add_item(m["name"])
@@ -368,30 +384,30 @@ func _process_tags_response(response_code : int, data : Dictionary) -> void:
 	if model_select_menu.item_count > 0:
 		model_select_menu.select(0)
 		selected_model_name = model_select_menu.get_item_text(0)
-		status_label.text = "Status: ready (" + selected_model_name + ")"
-		_set_status_color(Color(0.2,0.8,0.3))
+		
+	status_label.text = "Status: Ready (" + selected_model_name + ")"
+	_set_status_color(Color(0.2, 0.8, 0.3))
 
-func _handle_generation_response(response_code : int , body: PackedByteArray) -> void:
-	progression_timer.stop()
-	send_button.disabled = false
-	cancel_button.disabled = true
-	model_select_menu.disabled = false
-	
+func _handle_generation_response(response_code: int, body: PackedByteArray) -> void:
 	if response_code != 200:
 		if output_box.text != "Forging Process Aborted by User. T.A.L.O.S stands down.":
-			_execute_offline_fallback_fallback_procedure("Server Response Code %d" % response_code)
+			_execute_offline_fallback_procedure("Server Response Code %d" % response_code)
 		else:
-			progression_timer.stop()
-			send_button.disabled = false
-			cancel_button.disabled = true
-			model_select_menu.disabled = false
+			if progression_timer: progression_timer.stop()
+			if send_button: send_button.disabled = false
+			if cancel_button: cancel_button.disabled = true
+			if clear_cache_button: clear_cache_button.disabled = false
+			if model_select_menu: model_select_menu.disabled = false
 		return
-	progression_timer.stop()
-	send_button.disabled = false
-	cancel_button.disabled = true
-	model_select_menu.disabled = false
-	progression_bar.value = progression_bar.max_value
-	status_label.text = "Status: Computation Complete"
+		
+	if progression_timer: progression_timer.stop()
+	if send_button: send_button.disabled = false
+	if cancel_button: cancel_button.disabled = true
+	if clear_cache_button: clear_cache_button.disabled = false
+	if model_select_menu: model_select_menu.disabled = false
+	if progression_bar: progression_bar.value = progression_bar.max_value
+	if status_label:
+		status_label.text = "Status: Computation Complete"
 	_set_status_color(Color(0.1, 0.8, 0.5))
 	
 	var json = JSON.new()
@@ -400,43 +416,44 @@ func _handle_generation_response(response_code : int , body: PackedByteArray) ->
 		if response_data.has("response"):
 			var ai_raw_response = response_data["response"]
 			var clean_code = _extract_code_blocks(ai_raw_response)
-			output_box.text = clean_code
-			_write_to_offine_cache(running_request_hash, clean_code)
-			DisplayServer.clipboard_set(clean_code)
 			
+			output_box.text = clean_code
+			_write_to_offline_cache(running_request_hash, clean_code) # FIXED SYNTAX ERROR HERE
+			
+			DisplayServer.clipboard_set(clean_code)
 			if auto_insert_checkbox.button_pressed:
 				_insert_code_into_active_editor(clean_code)
 
-func _execute_offline_fallback_fallback_procedure(reason_str: String) -> void:
-	progression_timer.stop()
-	send_button.disabled = false
-	cancel_button.disabled = true
-	model_select_menu.disabled = false
+func _execute_offline_fallback_procedure(reason_str: String) -> void:
+	if progression_timer: progression_timer.stop()
+	if send_button: send_button.disabled = false
+	if cancel_button: cancel_button.disabled = true
+	if clear_cache_button: clear_cache_button.disabled = false
+	if model_select_menu: model_select_menu.disabled = false
 	
 	var cached_script = _read_from_offline_cache(running_request_hash)
 	if cached_script != "":
-		progression_bar.value = progression_bar.max_value
+		if progression_bar: progression_bar.value = progression_bar.max_value
 		output_box.text = cached_script
 		DisplayServer.clipboard_set(cached_script)
-		status_label.text = "Status: Offline Fallback Resolved (Fetched From Cache)"
-		_set_status_color(Color(0.0, 0.75, 0.85)) # Distinct Cyan color for database lookup
-		
+		if status_label:
+			status_label.text = "Status: Offline Fallback Resolved (Fetched From Cache)"
+		_set_status_color(Color(0.0, 0.75, 0.85))
 		if auto_insert_checkbox.button_pressed:
 			_insert_code_into_active_editor(cached_script)
 	else:
-		progression_bar.value = 0
-		output_box.text = "Error: Ollama Host Unreachable (%s).\nNo matching compiled historical modules found in offline database cache." % reason_str
-		status_label.text = "Status: Core Offline & Cache Miss"
+		if progression_bar: progression_bar.value = 0
+		output_box.text = "Error: Ollama Host Unreachable (%s).\nNo matching historical modules found." % reason_str
+		if status_label:
+			status_label.text = "Status: Core Offline & Cache Miss"
 		_set_status_color(Color(0.9, 0.2, 0.2))
 
 func _extract_code_blocks(raw_input : String) -> String:
 	if not "```" in raw_input:
 		return raw_input.strip_edges()
-		
 	var lines = raw_input.split("\n")
 	var extracted_code = ""
 	var inside_block = false
-	
 	for line in lines:
 		if line.begins_with("```"):
 			inside_block = !inside_block
@@ -453,14 +470,6 @@ func _insert_code_into_active_editor(code_to_insert: String) -> void:
 		if text_edits.size() > 0 and text_edits[0] is TextEdit:
 			var target_edit : TextEdit = text_edits[0] as TextEdit
 			target_edit.insert_text_at_caret(code_to_insert)
-			print("Talos auto insert triggered successfully.")
-		else:
-			var found_edit = _find_text_edit_recursive(base_editor)
-			if found_edit:
-				found_edit.insert_text_at_caret(code_to_insert)
-				print("Talos auto insertion triggered via fallback.")
-			else:
-				print("TALOS WARNING: could not locate textedit area inside coding window")
 
 func _find_text_edit_recursive(current_node : Node) -> TextEdit:
 	if current_node is TextEdit:
