@@ -6,6 +6,7 @@ var output_box : TextEdit
 var input_line : LineEdit
 var send_button : Button
 var cancel_button : Button
+var clear_cache_button : Button
 var auto_insert_checkbox : CheckBox
 var http_node: HTTPRequest
 var model_select_menu : OptionButton
@@ -111,6 +112,14 @@ func _exit_tree() -> void:
 	if dock:
 		remove_control_from_docks(dock)
 		dock.queue_free()
+
+func _write_to_offline_cache(hash_signature: String, code_content: String) -> void:
+	if hash_signature == "" or code_content.strip_edges() == "": return
+	var path = CACHE_DIR + hash_signature + ".cache"
+	var file = FileAccess.open(path, FileAccess.WRITE)
+	if file:
+		file.store_string(code_content)
+		file.close()
 
 func _init_editor_setting_configs() -> void:
 	if not ProjectSettings.has_setting(SETTING_SHORCUT):
@@ -248,22 +257,25 @@ func _load_local_xml_docs(class_name_str : String) -> String:
 func _get_deep_scene_context() -> String:
 	var scene_context = ""
 	var scene_root = EditorInterface.get_edited_scene_root()
+	if scene_root: 
+		scene_context += "\n--- Edited active scene tree hierarchy ---\n"
+		scene_context += "Root Node : %s (type : %s)\n" % [scene_root.name, scene_root.get_class()]
 	
-	var children = scene_root.find_children("*","", true, false)
-	for child in children:
-		scene_context += "-> Node Path Element: %s (Type: %S)\n" % [scene_root.get_path_to(child),child.get_class()]
-		var script = child.get_script()
-		if script and script is Script:
-			scene_context += "[Attached Script Content Found]: %s\n" % script.resource_path
-			var lines =  script.source_code.split("\n")
-			var line_count = 0 
-			for line in lines:
-				if line_count > 15:break
-				if line.begins_with("var") or line.begins_with("signal") or line.begins_with("func"):
-					scene_context += "| %s\n" % line.strip_edges()
-					line_count += 1
-			return scene_context
-			
+		var children = scene_root.find_children("*","", true, false)
+		for child in children:
+			scene_context += "-> Node Path Element: %s (Type: %S)\n" % [scene_root.get_path_to(child),child.get_class()]
+			var script = child.get_script()
+			if script and script is Script:
+				scene_context += "[Attached Script Content Found]: %s\n" % script.resource_path
+				var lines =  script.source_code.split("\n")
+				var line_count = 0 
+				for line in lines:
+					if line_count > 15:break
+					if line.begins_with("var") or line.begins_with("signal") or line.begins_with("func"):
+						scene_context += "| %s\n" % line.strip_edges()
+						line_count += 1
+	return scene_context
+
 
 func _get_editor_context() -> String:
 	var context = ""
@@ -328,7 +340,8 @@ func _on_send_button_pressed() -> void:
 		+ "Return only clean code blocks."
 	)
 	var combined_prompt = "CONTEXT Strings:\n" + project_context + "\n\nUSER REQUEST: " + user_prompt
-	running_request_hash = "".md5_text(combined_prompt + "_" + selected_model_name)
+	var raw_combination_string = combined_prompt +"_" + selected_model_name
+	running_request_hash = raw_combination_string.md5_text()
 	
 	var body = {
 		"model": selected_model_name,
