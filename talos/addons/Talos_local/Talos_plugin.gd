@@ -1,6 +1,8 @@
 @tool
 extends EditorPlugin
 
+var main_tabs : TabContainer
+var history_pannel : VBoxContainer
 var dock : VBoxContainer
 var output_box : TextEdit
 var input_line : LineEdit
@@ -13,6 +15,9 @@ var model_select_menu : OptionButton
 var status_label : Label
 var progression_bar : ProgressBar
 var progression_timer :Timer
+var history_list : ItemList
+var history_preview :TextEdit
+var history_insert_button : Button
 
 const OLLAMA_URL = "http://localhost:11434/api/generate"
 const OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
@@ -22,15 +27,21 @@ const CACHE_DIR = "user://Talos_cache/"
 const SETTING_SHORCUT = "plugins/talos/shortcut_key"
 
 var running_request_hash = ""
+var history_hashes : Array[String] = []
 
 
 func _enter_tree() -> void:
-	dock = VBoxContainer.new()
-	dock.name = "T.A.L.O.S"
+	_init_cache_directory()
+	_init_editor_setting_configs()
 	
-	dock.custom_minimum_size = Vector2(250, 400)
-	dock.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	dock.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	main_tabs = TabContainer.new()
+	main_tabs.name = "T.A.L.O.S"
+	main_tabs.custom_minimum_size = Vector2(250, 580)
+	main_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	main_tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	
+	dock = VBoxContainer.new()
+	dock.name = "Forge"
 	
 	output_box = TextEdit.new()
 	output_box.editable = false
@@ -64,9 +75,14 @@ func _enter_tree() -> void:
 	cancel_button = Button.new()
 	cancel_button.text = "ABORT Forging"
 	cancel_button.disabled = true
+	cancel_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	
 	button_box.add_child(send_button)
 	button_box.add_child(cancel_button)
+	
+	clear_cache_button = Button.new()
+	clear_cache_button.text = "clear cache database"
+	clear_cache_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	
 	status_label = Label.new()
 	status_label.text = "Status: IDLE"
@@ -98,8 +114,39 @@ func _enter_tree() -> void:
 	dock.add_child(http_node)
 	dock.add_child(progression_timer)
 	
+	#Cache module history side bar
+	history_pannel == VBoxContainer.new()
+	history_pannel.name = ("History Modules")
+	
+	var history_info_label = Label.new()
+	history_info_label.text = "Comiled cache modules:"
+	history_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	
+	history_list = ItemList.new()
+	history_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	history_list.item_selected.connect(_on_history_item_selected)
+	
+	history_preview = TextEdit.new()
+	history_preview.editable = false
+	history_preview.placeholder_text = "select a historical script signature"
+	history_preview.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	
+	history_insert_button = Button.new()
+	history_insert_button.text = "inject selected module"
+	history_insert_button.disabled = true
+	history_insert_button.pressed.connect(_on_history_insert_pressed)
+	
+	history_pannel.add_child(history_info_label)
+	history_pannel.add_child(history_list)
+	history_pannel.add_child(history_preview)
+	history_pannel.add_child(history_insert_button)
+	
+	main_tabs.add_child(dock)
+	main_tabs.add_child(history_pannel)
+	
 	send_button.pressed.connect(_on_send_button_pressed)
 	cancel_button.pressed.connect(_on_cancel_button_pressed)
+	clear_cache_button.pressed.connect(_on_clear_cache_pressed)
 	http_node.request_completed.connect(_on_http_routing_coordinator)
 	progression_timer.timeout.connect(_on_progress_tick)
 	
@@ -107,11 +154,53 @@ func _enter_tree() -> void:
 	print("talos ui forced into editor successfully.")
 	
 	_fetch_local_ollama_models()
+	_refresh_history_list()
 
 func _exit_tree() -> void:
 	if dock:
 		remove_control_from_docks(dock)
-		dock.queue_free()
+		main_tabs.queue_free()
+
+func _show_ui_notification_banner(message: String, accent_color: Color) -> void:
+	var script_editor = EditorInterface.get_script_editor()
+	if not script_editor: return
+	
+	var banner = PanelContainer.new()
+	var style = StyleBoxFlat.new()
+	style.bg_color = Color(0.12, 0.12, 0.16, 0.95)
+	style.border_width_bottom = 3
+	style.border_color = accent_color
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	banner.add_theme_stylebox_override("panel", style)
+	
+	banner.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	banner.custom_minimum_size = Vector2(400, 45)
+	
+	var margin = MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 15)
+	margin.add_theme_constant_override("margin_right", 15)
+	
+	var label = Label.new()
+	label.text = "⚡ T.A.L.O.S: " + message
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.add_theme_color_override("font_color", Color(0.95, 0.95, 0.95))
+	
+	margin.add_child(label)
+	banner.add_child(margin)
+	script_editor.add_child(banner)
+	
+	# Dynamic Position Assignment Anchors top center of viewport workspace
+	banner.set_anchors_and_offsets_preset(Control.PRESET_TOP_CEIL, Control.PRESET_MODE_MINSIZE)
+	banner.offset_top = 10
+	
+	# Auto dismissal cycle logic tracking standard timers
+	var banner_timer = script_editor.get_tree().create_timer(3.2)
+	banner_timer.timeout.connect(func(): 
+		if is_instance_valid(banner):
+			banner.queue_free()
+	)
 
 func _write_to_offline_cache(hash_signature: String, code_content: String) -> void:
 	if hash_signature == "" or code_content.strip_edges() == "": return
@@ -120,6 +209,7 @@ func _write_to_offline_cache(hash_signature: String, code_content: String) -> vo
 	if file:
 		file.store_string(code_content)
 		file.close()
+		_refresh_history_list()
 
 func _init_editor_setting_configs() -> void:
 	if not ProjectSettings.has_setting(SETTING_SHORCUT):
@@ -216,10 +306,45 @@ func _on_clear_cache_pressed() -> void:
 				dir.remove(file_name)
 				count += 1
 			file_name = dir.get_next()
+		if status_label:
+			status_label.text = "Status: Purged %d Cached Files Successfully" % count
+			_set_status_color(Color(0.9,0.3,0.3))
 		
-		status_label.text = "Status: Purged %d Cached Files Successfully" % count
-		_set_status_color(Color(0.9,0.3,0.3))
-		
+		_show_ui_notification_banner("Cache system cleared completely.", Color(0.9,0.3,0.3))
+		_refresh_history_list()
+		if history_preview : history_preview.text = ""
+
+func _refresh_history_list() -> void:
+	if not history_list: return
+	history_list.clear()
+	history_hashes.clear()
+	
+	var dir = DirAccess.open(CACHE_DIR)
+	if dir: 
+		dir.list_dir_begin()
+		var file_name = dir.get_next()
+		while file_name != "":
+			if not dir.current_is_dir() and file_name.ends_with(".cache"):
+				var raw_hash = file_name.replace(".cache", "")
+				history_hashes.append(raw_hash)
+				history_list.add_item("Signature Block: [" + raw_hash.left(8) +"..]")
+			file_name = dir.get_next()
+			
+
+func _on_history_item_selected(index: int) -> void:
+	if index >= history_hashes.size() or not history_preview: return
+	var target_hash = history_hashes[index]
+	var cached_code = _read_from_offline_cache(target_hash)
+	history_preview.text = cached_code
+	if history_insert_button : history_insert_button.disabled = false
+
+func _on_history_insert_pressed() -> void:
+	if history_preview and history_preview.text != "":
+		_insert_code_into_active_editor(history_preview.text)
+		_show_ui_notification_banner("Historical Module Injected Successfully", Color(0.1,0.8,0.5))
+
+
+
 func _load_local_xml_docs(class_name_str : String) -> String:
 	var doc_context = ""
 	var file_path = LOCAL_XML_DOCS_PATH + class_name_str.to_lower() + ".xml"
