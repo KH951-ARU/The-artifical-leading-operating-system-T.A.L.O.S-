@@ -239,6 +239,7 @@ func _init_cache_directory() -> void:
 	if not DirAccess.dir_exists_absolute(CACHE_DIR):
 		DirAccess.make_dir_absolute(CACHE_DIR) 
 
+
 func _apply_segmented_style(bar : ProgressBar) -> void:
 	var bg_style = StyleBoxFlat.new()
 	bg_style.bg_color = Color(0.08, 0.08, 0.1,0.1)
@@ -267,10 +268,15 @@ func _on_progress_tick() -> void:
 		progression_bar.value += progression_bar.step
 
 func _fetch_local_ollama_models() -> void:
+	if not status_label: return
 	status_label.text = "Status: Querying host models..."
 	_set_status_color(Color(0.9,0.3,0.3))
+	var error =http_node.request(OLLAMA_TAGS_URL,[],HTTPClient.METHOD_GET)
+	if error != OK:
+		status_label.text = "Status: local server offline"
 
 func _on_model_selected(index : int) -> void:
+	if not model_select_menu or not status_label:return
 	selected_model_name = model_select_menu.get_item_text(index)
 	status_label.text = "Status: Switched to " + selected_model_name
 	_set_status_color(Color(0.2,0.7,0.9))
@@ -342,7 +348,6 @@ func _on_history_insert_pressed() -> void:
 	if history_preview and history_preview.text != "":
 		_insert_code_into_active_editor(history_preview.text)
 		_show_ui_notification_banner("Historical Module Injected Successfully", Color(0.1,0.8,0.5))
-
 
 
 func _load_local_xml_docs(class_name_str : String) -> String:
