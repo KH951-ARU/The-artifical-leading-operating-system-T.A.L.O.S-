@@ -4,6 +4,7 @@ extends EditorPlugin
 var main_tabs : TabContainer
 var history_pannel : VBoxContainer
 var dock : VBoxContainer
+
 var output_box : TextEdit
 var input_line : LineEdit
 var send_button : Button
@@ -15,6 +16,7 @@ var model_select_menu : OptionButton
 var status_label : Label
 var progression_bar : ProgressBar
 var progression_timer :Timer
+
 var history_list : ItemList
 var history_preview :TextEdit
 var history_insert_button : Button
@@ -28,7 +30,6 @@ const SETTING_SHORCUT = "plugins/talos/shortcut_key"
 
 var running_request_hash = ""
 var history_hashes : Array[String] = []
-
 
 func _enter_tree() -> void:
 	_init_cache_directory()
@@ -108,6 +109,7 @@ func _enter_tree() -> void:
 	dock.add_child(progression_bar)
 	dock.add_child(model_box)
 	dock.add_child(button_box)
+	dock.add_child(clear_cache_button)
 	dock.add_child(status_label)
 	dock.add_child(auto_insert_checkbox)
 	dock.add_child(input_line)
@@ -119,7 +121,7 @@ func _enter_tree() -> void:
 	history_pannel.name = ("History Modules")
 	
 	var history_info_label = Label.new()
-	history_info_label.text = "Comiled cache modules:"
+	history_info_label.text = "Compiled cache modules:"
 	history_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	
 	history_list = ItemList.new()
@@ -157,7 +159,7 @@ func _enter_tree() -> void:
 	_refresh_history_list()
 
 func _exit_tree() -> void:
-	if dock:
+	if main_tabs:
 		remove_control_from_docks(dock)
 		main_tabs.queue_free()
 
@@ -192,7 +194,7 @@ func _show_ui_notification_banner(message: String, accent_color: Color) -> void:
 	script_editor.add_child(banner)
 	
 	# Dynamic Position Assignment Anchors top center of viewport workspace
-	banner.set_anchors_and_offsets_preset(Control.PRESET_TOP_CEIL, Control.PRESET_MODE_MINSIZE)
+	banner.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE, Control.PRESET_MODE_MINSIZE)
 	banner.offset_top = 10
 	
 	# Auto dismissal cycle logic tracking standard timers
@@ -202,9 +204,42 @@ func _show_ui_notification_banner(message: String, accent_color: Color) -> void:
 			banner.queue_free()
 	)
 
+func _run_code_diagnostics(code_to_verify: String) -> bool:
+	if code_to_verify.strip_edges() =="": return false
+	
+	var dynamic_script = GDScript.new()
+	dynamic_script.source_code = code_to_verify
+	var compilation_error = dynamic_script.reload()
+	if compilation_error != OK:
+		_show_ui_notification_banner("Syntax Check Failed! code block contains token errors.", Color(0.9,0.2,0.2))
+		_set_status_color(Color(0.9,0.2,0.2))
+	return false
+
+func _get_next_backup_index() -> int:
+	var highest_index = 0
+	var dir = DirAccess.open(CACHE_DIR)
+	if dir:
+		dir.list_dir_begin()
+		var file_name = dir.get_next()
+		while file_name != "":
+			if not dir.current_is_dir() and file_name.begins_with("Backup_") and file_name.ends_with(".cache"):
+				var structures = file_name.split("_")
+				if structures.size() > 1:
+					var index_val = structures[1].to_int()
+					if index_val > highest_index:
+						highest_index = index_val
+			file_name = dir.get_next()
+	return highest_index + 1
+
 func _write_to_offline_cache(hash_signature: String, code_content: String) -> void:
-	if hash_signature == "" or code_content.strip_edges() == "": return
-	var path = CACHE_DIR + hash_signature + ".cache"
+	if code_content.strip_edges() == "": return
+	
+	var next_idx = _get_next_backup_index()
+	var time_dict = Time.get_time_dict_from_system()
+	var time_stamp = "%02d-%02d" % [time_dict["hour"], time_dict["minute"]]
+	
+	var custom_backup_filename = "Backup_%04d_%s" % [next_idx, time_stamp]
+	var path = CACHE_DIR + custom_backup_filename + ".cache"
 	var file = FileAccess.open(path, FileAccess.WRITE)
 	if file:
 		file.store_string(code_content)
@@ -259,7 +294,8 @@ func _apply_segmented_style(bar : ProgressBar) -> void:
 	bar.add_theme_stylebox_override("fill", fg_style)
 
 func _set_status_color(color : Color) -> void:
-	status_label.add_theme_color_override("font_color", color)
+	if status_label:
+		status_label.add_theme_color_override("font_color", color)
 
 func _on_progress_tick() -> void:
 	if progression_bar.value >= progression_bar.max_value:
@@ -274,6 +310,7 @@ func _fetch_local_ollama_models() -> void:
 	var error =http_node.request(OLLAMA_TAGS_URL,[],HTTPClient.METHOD_GET)
 	if error != OK:
 		status_label.text = "Status: local server offline"
+		_set_status_color(Color(0.9,0.5,0.2))
 
 func _on_model_selected(index : int) -> void:
 	if not model_select_menu or not status_label:return
@@ -371,17 +408,14 @@ func _load_local_xml_docs(class_name_str : String) -> String:
 			if node_type == XMLParser.NODE_ELEMENT:
 				if node_name == "description":
 					inside_description = true
-			elif node_name == "method":
-				method_name = parser.get_named_attribute_value_safe("name")
-				doc_context += " - Method API: %s\n" % method_name
-			elif node_type == XMLParser.NODE_TEXT and inside_description:
-				var text = parser.get_node_data().strip_edges()
-				if text != "":
-					doc_context += "Class Description : %s\n" % text
-				inside_description = false
-			elif node_type == XMLParser.NODE_ELEMENT_END and node_name == "description":
-				inside_description = false
-		file.close()
+				elif node_type == XMLParser.NODE_TEXT and inside_description:
+					var text = parser.get_node_data().strip_edges()
+					if text != "":
+						doc_context += "class description : %s\n" % text
+						inside_description = false
+					elif node_type == XMLParser.NODE_ELEMENT_END and node_name == "description":
+						inside_description = false
+						file.close()
 	return doc_context 
 
 func _get_deep_scene_context() -> String:
@@ -527,9 +561,8 @@ func _process_tags_response(response_code: int, data: Dictionary) -> void:
 	if model_select_menu.item_count > 0:
 		model_select_menu.select(0)
 		selected_model_name = model_select_menu.get_item_text(0)
-		
-	status_label.text = "Status: Ready (" + selected_model_name + ")"
-	_set_status_color(Color(0.2, 0.8, 0.3))
+		status_label.text = "Status: Ready (" + selected_model_name + ")"
+		_set_status_color(Color(0.2, 0.8, 0.3))
 
 func _handle_generation_response(response_code: int, body: PackedByteArray) -> void:
 	if response_code != 200:
@@ -562,6 +595,7 @@ func _handle_generation_response(response_code: int, body: PackedByteArray) -> v
 			
 			output_box.text = clean_code
 			_write_to_offline_cache(running_request_hash, clean_code) # FIXED SYNTAX ERROR HERE
+			_show_ui_notification_banner("Generation Finished & cached.", Color(0.1,0.8,0.5))
 			
 			DisplayServer.clipboard_set(clean_code)
 			if auto_insert_checkbox.button_pressed:
@@ -581,7 +615,9 @@ func _execute_offline_fallback_procedure(reason_str: String) -> void:
 		DisplayServer.clipboard_set(cached_script)
 		if status_label:
 			status_label.text = "Status: Offline Fallback Resolved (Fetched From Cache)"
-		_set_status_color(Color(0.0, 0.75, 0.85))
+			_set_status_color(Color(0.0, 0.75, 0.85))
+			_show_ui_notification_banner("server unreachable. Resolved from offline cache.",Color(0.0,0.75,0.85))
+		
 		if auto_insert_checkbox.button_pressed:
 			_insert_code_into_active_editor(cached_script)
 	else:
