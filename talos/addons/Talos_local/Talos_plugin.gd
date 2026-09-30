@@ -61,10 +61,12 @@ func _enter_tree() -> void:
 	var model_box = HBoxContainer.new()
 	var model_label = Label.new()
 	model_label.text = "Model: "
+	
 	model_select_menu = OptionButton.new()
 	model_select_menu.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	model_select_menu.add_item(selected_model_name)
 	model_select_menu.item_selected.connect(_on_model_selected)
+	
 	model_box.add_child(model_label)
 	model_box.add_child(model_select_menu)
 	
@@ -117,8 +119,8 @@ func _enter_tree() -> void:
 	dock.add_child(progression_timer)
 	
 	#Cache module history side bar
-	history_pannel == VBoxContainer.new()
-	history_pannel.name = ("History Modules")
+	history_pannel = VBoxContainer.new()
+	history_pannel.name = "History Modules"
 	
 	var history_info_label = Label.new()
 	history_info_label.text = "Compiled cache modules:"
@@ -152,15 +154,15 @@ func _enter_tree() -> void:
 	http_node.request_completed.connect(_on_http_routing_coordinator)
 	progression_timer.timeout.connect(_on_progress_tick)
 	
-	add_control_to_dock(EditorPlugin.DOCK_SLOT_RIGHT_BR, dock)
+	add_control_to_dock(EditorPlugin.DOCK_SLOT_RIGHT_BR, main_tabs)
 	print("talos ui forced into editor successfully.")
 	
-	_fetch_local_ollama_models()
+	Callable(_fetch_local_ollama_models).call_deferred()
 	_refresh_history_list()
 
 func _exit_tree() -> void:
 	if main_tabs:
-		remove_control_from_docks(dock)
+		remove_control_from_docks(main_tabs)
 		main_tabs.queue_free()
 
 func _show_ui_notification_banner(message: String, accent_color: Color) -> void:
