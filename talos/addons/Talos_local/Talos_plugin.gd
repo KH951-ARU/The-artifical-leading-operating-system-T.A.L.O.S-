@@ -21,6 +21,11 @@ var history_list : ItemList
 var history_preview :TextEdit
 var history_insert_button : Button
 
+var diff_window : AcceptDialog
+var diff_left_view : TextEdit
+var diff_right_view : TextEdit
+var pending_injection_code : String = ""
+
 const OLLAMA_URL = "http://localhost:11434/api/generate"
 const OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 var selected_model_name = "qwen2.5-coder:3b"
@@ -148,6 +153,8 @@ func _enter_tree() -> void:
 	main_tabs.add_child(dock)
 	main_tabs.add_child(history_pannel)
 	
+	_setup_diff_viewer_window()
+	
 	send_button.pressed.connect(_on_send_button_pressed)
 	cancel_button.pressed.connect(_on_cancel_button_pressed)
 	clear_cache_button.pressed.connect(_on_clear_cache_pressed)
@@ -164,7 +171,102 @@ func _exit_tree() -> void:
 	if main_tabs:
 		remove_control_from_docks(main_tabs)
 		main_tabs.queue_free()
+	if diff_window:
+		diff_window.queue_free()
 
+func _setup_diff_viewer_window() -> void:
+	diff_window = AcceptDialog.new()
+	diff_window.title = "⚖️ T.A.L.O.S Script Comparative Diff Matrix"
+	diff_window.custom_minimum_size = Vector2(900,600)
+	diff_window.ok_button_text = "commit and Inject Code Block"
+	diff_window.confirmed.connect(_on_diff_window_confirmed)
+	
+	var main_vbox = VBoxContainer.new()
+	main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	main_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	
+	var header_lbl = Label.new
+	header_lbl.text = "Review structural updates before comitting to active workspace."
+	header_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	main_vbox.add_child(header_lbl)
+	
+	var hsplit = HBoxContainer.new()
+	hsplit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hsplit.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	hsplit.split_offset = 450
+	
+	var left_vbox = VBoxContainer.new()
+	left_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var left_lbl = Label.new()
+	left_lbl.text = "Current Workspace State"
+	diff_left_view = TextEdit.new()
+	diff_left_view.editable = false
+	diff_left_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	left_vbox.add_child(left_lbl)
+	left_vbox.add_child(diff_left_view)
+	
+	var right_vbox = VBoxContainer.new()
+	right_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var right_lbl = Label.new()
+	right_lbl.text = "T.A.L.O.S Code Offering"
+	diff_right_view = TextEdit.new()
+	diff_right_view.editable = false
+	diff_right_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right_vbox.add_child(right_lbl)
+	right_vbox.add_child(diff_right_view)
+	
+	hsplit.add_child(left_vbox)
+	hsplit.add_child(right_vbox)
+	main_vbox.add_child(hsplit)
+	diff_window.add_child(main_vbox)
+	
+	EditorInterface.get_base_control().add_child(diff_window)
+
+func _trigger_diff_comparison_view(incoming_code: String) -> void:
+	pending_injection_code = incoming_code
+	
+	# Fetch original active code contents securely
+	var original_code = ""
+	var script_editor = EditorInterface.get_script_editor()
+	var current_script = script_editor.get_current_script()
+	if current_script:
+		original_code = current_script.source_code
+		
+	diff_left_view.text = original_code
+	diff_right_view.text = incoming_code
+	
+	# Highlighting differences using temporary, dynamic code highlighters
+	var left_highlighter = CodeHighlighter.new()
+	var right_highlighter = CodeHighlighter.new()
+	
+	# Quick structural line lookup loops parsing difference tags
+	var left_lines = original_code.split("\n")
+	var right_lines = incoming_code.split("\n")
+	
+	for i in range(left_lines.size()):
+		if i >= right_lines.size() or left_lines[i] != right_lines[i]:
+			# Line modified or dropped: Color Left text element line dark red tint
+			diff_left_view.set_line_background_color(i, Color(0.5, 0.1, 0.1, 0.25))
+			
+	for j in range(right_lines.size()):
+		if j >= left_lines.size() or right_lines[j] != left_lines[j]:
+			# Line added or fresh structure: Color Right container line dark green tint
+			diff_right_view.set_line_background_color(j, Color(0.1, 0.5, 0.1, 0.25))
+			
+	diff_window.popup_centered()
+
+func _on_diff_window_confirmed() -> void:
+	if pending_injection_code != "":
+		if _run_code_diagnostics(pending_injection_code):
+			_insert_code_into_active_editor(pending_injection_code)
+			_show_ui_notification_banner("Module committed via Diff Panel review.", Color(0.1, 0.8, 0.5))
+	pending_injection_code = ""
+
+#==============================================================================
+#UI NOTIFICATION BANNER ENGINE INTERFACE
+#==============================================================================
 func _show_ui_notification_banner(message: String, accent_color: Color) -> void:
 	var script_editor = EditorInterface.get_script_editor()
 	if not script_editor: return
@@ -206,6 +308,10 @@ func _show_ui_notification_banner(message: String, accent_color: Color) -> void:
 			banner.queue_free()
 	)
 
+#==============================================================================
+#AUTOMATIC CODE DIAGNOSTICS ROUTINE
+#==============================================================================
+
 func _run_code_diagnostics(code_to_verify: String) -> bool:
 	if code_to_verify.strip_edges() =="": return false
 	
@@ -216,6 +322,12 @@ func _run_code_diagnostics(code_to_verify: String) -> bool:
 		_show_ui_notification_banner("Syntax Check Failed! code block contains token errors.", Color(0.9,0.2,0.2))
 		_set_status_color(Color(0.9,0.2,0.2))
 	return false
+	
+	return true
+
+#==============================================================================
+#AUTO-INCREMENTING BACKUP TRACKER UTILITIES
+#==============================================================================
 
 func _get_next_backup_index() -> int:
 	var highest_index = 0
