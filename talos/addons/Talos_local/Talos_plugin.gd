@@ -1,10 +1,12 @@
 @tool
 extends EditorPlugin
 
+#UI hierarchy nodes
 var main_tabs : TabContainer
 var history_pannel : VBoxContainer
 var dock : VBoxContainer
 
+#forging Tabs elements
 var output_box : TextEdit
 var input_line : LineEdit
 var send_button : Button
@@ -17,6 +19,7 @@ var status_label : Label
 var progression_bar : ProgressBar
 var progression_timer :Timer
 
+#history tab elements
 var history_list : ItemList
 var history_preview :TextEdit
 var history_insert_button : Button
@@ -40,14 +43,18 @@ func _enter_tree() -> void:
 	_init_cache_directory()
 	_init_editor_setting_configs()
 	
+	# root layout wrapper container
 	main_tabs = TabContainer.new()
 	main_tabs.name = "T.A.L.O.S"
 	main_tabs.custom_minimum_size = Vector2(250, 580)
 	main_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	main_tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	
+	# ==========================================
+	# TAB 1: CODE FORGING COCKPIT
+	# ==========================================
 	dock = VBoxContainer.new()
-	dock.name = "Forge"
+	dock.name = "Forging"
 	
 	output_box = TextEdit.new()
 	output_box.editable = false
@@ -60,7 +67,7 @@ func _enter_tree() -> void:
 	progression_bar.step = 1.0 # creates segments
 	progression_bar.value = 0
 	progression_bar.show_percentage = false
-	progression_bar.custom_minimum_size = Vector2(0, 16)
+	progression_bar.custom_minimum_size = Vector2(0, 14)
 	_apply_segmented_style(progression_bar)
 	
 	var model_box = HBoxContainer.new()
@@ -104,7 +111,7 @@ func _enter_tree() -> void:
 	
 	auto_insert_checkbox = CheckBox.new()
 	auto_insert_checkbox.text = "auto insert at cursor position"
-	auto_insert_checkbox.button_pressed = false
+	auto_insert_checkbox.button_pressed = true
 	
 	input_line = LineEdit.new()
 	input_line.placeholder_text = "Request a offering to T.A.L.O.S for a creation"
@@ -123,7 +130,10 @@ func _enter_tree() -> void:
 	dock.add_child(http_node)
 	dock.add_child(progression_timer)
 	
-	#Cache module history side bar
+	# ==========================================
+	# TAB 2: CACHE MODULE HISTORY SIDEBAR
+	# ==========================================
+	
 	history_pannel = VBoxContainer.new()
 	history_pannel.name = "History Modules"
 	
@@ -141,7 +151,7 @@ func _enter_tree() -> void:
 	history_preview.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	
 	history_insert_button = Button.new()
-	history_insert_button.text = "inject selected module"
+	history_insert_button.text = "Inject selected module"
 	history_insert_button.disabled = true
 	history_insert_button.pressed.connect(_on_history_insert_pressed)
 	
@@ -150,11 +160,14 @@ func _enter_tree() -> void:
 	history_pannel.add_child(history_preview)
 	history_pannel.add_child(history_insert_button)
 	
+	# Assembly Tab Layout Framework
 	main_tabs.add_child(dock)
 	main_tabs.add_child(history_pannel)
 	
+	# Initialise Dynamic Comparative Layout Subsystems
 	_setup_diff_viewer_window()
 	
+	# Signal Connections
 	send_button.pressed.connect(_on_send_button_pressed)
 	cancel_button.pressed.connect(_on_cancel_button_pressed)
 	clear_cache_button.pressed.connect(_on_clear_cache_pressed)
@@ -174,10 +187,14 @@ func _exit_tree() -> void:
 	if diff_window:
 		diff_window.queue_free()
 
+# ==============================================================================
+# LIVE DIFF VIEWING LAYOUT SUB-SYSTEM
+# ==============================================================================
+
 func _setup_diff_viewer_window() -> void:
 	diff_window = AcceptDialog.new()
 	diff_window.title = "⚖️ T.A.L.O.S Script Comparative Diff Matrix"
-	diff_window.custom_minimum_size = Vector2(900,600)
+	diff_window.min_size = Vector2(900,600)
 	diff_window.ok_button_text = "commit and Inject Code Block"
 	diff_window.confirmed.connect(_on_diff_window_confirmed)
 	
@@ -195,6 +212,7 @@ func _setup_diff_viewer_window() -> void:
 	hsplit.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	hsplit.split_offset = 450
 	
+	# Current script window (Left Column Container)
 	var left_vbox = VBoxContainer.new()
 	left_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	left_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -206,6 +224,7 @@ func _setup_diff_viewer_window() -> void:
 	left_vbox.add_child(left_lbl)
 	left_vbox.add_child(diff_left_view)
 	
+	# Incoming T.A.L.O.S script container (Right Column Container)
 	var right_vbox = VBoxContainer.new()
 	right_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	right_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -230,10 +249,17 @@ func _trigger_diff_comparison_view(incoming_code: String) -> void:
 	# Fetch original active code contents securely
 	var original_code = ""
 	var script_editor = EditorInterface.get_script_editor()
-	var current_script = script_editor.get_current_script()
-	if current_script:
-		original_code = current_script.source_code
+	if script_editor:
+		var current_script = script_editor.get_current_script()
+		if current_script:
+			original_code = current_script.source_code
 		
+	diff_left_view.text = original_code
+	diff_right_view.text = incoming_code
+	
+	# Wipe past background visual overrides cleanly before calculating shifts
+	diff_left_view.clear()
+	diff_right_view.clear()
 	diff_left_view.text = original_code
 	diff_right_view.text = incoming_code
 	
