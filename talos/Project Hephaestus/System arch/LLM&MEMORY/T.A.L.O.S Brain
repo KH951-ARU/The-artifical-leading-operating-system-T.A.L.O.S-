@@ -1,0 +1,182 @@
+import json
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ==========================================
+# 1. CUSTOM TOKENIZER (NO EXTERNAL LIBRARIES)
+# ==========================================
+class CharTokenizer:
+    def __init__(self, text):
+        chars = sorted(list(set(text)))
+        self.vocab_size = len(chars)
+        self.stoi = {ch: i for i, ch in enumerate(chars)}
+        self.itos = {i: ch for i, ch in enumerate(chars)}
+
+    def encode(self, s):
+        return [self.stoi[c] for c in s if c in self.stoi]
+
+    def decode(self, l):
+        return ''.join([self.itos[i] for i in l])
+
+
+# ==========================================
+# 2. MINI-GPT TRANSFORMER ARCHITECTURE
+# ==========================================
+class MiniTalosLLM(nn.Module):
+    def __init__(self, vocab_size, embed_dim=64, num_heads=4, num_layers=3, max_len=128):
+        super().__init__()
+        self.max_len = max_len
+        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.position_embedding = nn.Embedding(max_len, embed_dim)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=embed_dim * 4,
+            dropout=0.1,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.lm_head = nn.Linear(embed_dim, vocab_size)
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        positions = torch.arange(0, T, device=idx.device).unsqueeze(0)
+        x = self.token_embedding(idx) + self.position_embedding(positions)
+
+        causal_mask = nn.Transformer.generate_square_subsequent_mask(T).to(idx.device)
+        x = self.transformer(x, mask=causal_mask, is_causal=True)
+        logits = self.lm_head(x)
+
+        loss = None
+        if targets is not None:
+            B, T, C = logits.shape
+            loss = F.cross_entropy(logits.view(B * T, C), targets.view(B * T))
+
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens=60, temperature=0.7):
+        self.eval()
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -self.max_len:]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, next_token), dim=1)
+        return idx
+
+
+# ==========================================
+# 3. PURE-NUMPY LONG-TERM MEMORY SYSTEM
+# ==========================================
+class TalosMemory:
+    def __init__(self, filepath="talos_memory.json"):
+        self.filepath = filepath
+        self.memories = self._load()
+
+    def _load(self):
+        if os.path.exists(self.filepath):
+            with open(self.filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return []
+
+    def add_memory(self, text):
+        if text not in self.memories:
+            self.memories.append(text)
+            with open(self.filepath, "w", encoding="utf-8") as f:
+                json.dump(self.memories, f, indent=2)
+
+    def _vectorize(self, text, vocab):
+        words = text.lower().split()
+        vec = np.zeros(len(vocab), dtype=np.float32)
+        for w in words:
+            if w in vocab:
+                vec[vocab[w]] += 1.0
+        return vec
+
+    def search(self, query, top_k=2):
+        if not self.memories:
+            return []
+
+        # Build dynamic word vocabulary across query and stored memories
+        all_words = set(query.lower().split())
+        for m in self.memories:
+            all_words.update(m.lower().split())
+        vocab = {w: i for i, w in enumerate(all_words)}
+
+        q_vec = self._vectorize(query, vocab)
+        q_norm = np.linalg.norm(q_vec)
+        if q_norm == 0:
+            return []
+
+        scored = []
+        for m in self.memories:
+            m_vec = self._vectorize(m, vocab)
+            m_norm = np.linalg.norm(m_vec)
+            if m_norm > 0:
+                similarity = np.dot(q_vec, m_vec) / (q_norm * m_norm)
+                scored.append((similarity, m))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [m for sim, m in scored[:top_k] if sim > 0.1]
+
+
+# ==========================================
+# 4. TRAINING & EXECUTION EXAMPLE
+# ==========================================
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Sample training dataset (Expand this with your own command-response pairs)
+    training_data = (
+        "User: Hello Talos\nTalos: Systems online. How may I assist you?\n"
+        "User: Turn on the lights\nTalos: [ACTION: lights_on()] Turning on the lights.\n"
+        "User: What time is it\nTalos: [ACTION: get_time()] Checking the system clock.\n"
+        "User: Status report\nTalos: All core modules are operating within normal parameters.\n"
+    ) * 50  # Repeated so the tiny model can learn the patterns quickly
+
+    tokenizer = CharTokenizer(training_data)
+    data_ids = torch.tensor(tokenizer.encode(training_data), dtype=torch.long)
+
+    model = MiniTalosLLM(vocab_size=tokenizer.vocab_size).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3)
+
+    # Quick Training Loop
+    print("Training MiniTalosLLM...")
+    model.train()
+    block_size = 64
+    batch_size = 16
+
+    for step in range(300):
+        ix = torch.randint(len(data_ids) - block_size, (batch_size,))
+        x = torch.stack([data_ids[i:i + block_size] for i in ix]).to(device)
+        y = torch.stack([data_ids[i + 1:i + block_size + 1] for i in ix]).to(device)
+
+        _, loss = model(x, y)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Initialize Memory & Test Inference
+    memory = TalosMemory()
+    memory.add_memory("The user prefers concise technical responses.")
+    memory.add_memory("Workshop lights are connected to local IP 192.168.1.50.")
+
+    user_prompt = "Turn on the lights"
+    relevant_facts = memory.search(user_prompt)
+
+    formatted_input = f"User: {user_prompt}\nTalos:"
+    input_ids = torch.tensor([tokenizer.encode(formatted_input)], dtype=torch.long).to(device)
+
+    output_ids = model.generate(input_ids, max_new_tokens=45)
+    response = tokenizer.decode(output_ids[0].tolist())
+
+    print("\n--- Retrieved Memory ---")
+    print(relevant_facts)
+    print("\n--- Model Output ---")
+    print(response.split("\nUser:")[0])
