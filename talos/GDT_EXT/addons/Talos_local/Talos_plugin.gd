@@ -35,6 +35,8 @@ var diff_window: AcceptDialog
 var diff_left_view: TextEdit
 var diff_right_view: TextEdit
 var diff_inject_partial_btn: Button
+var diff_block_selector : OptionButton
+var parsed_code_blocks : Array[String] = []
 var pending_injection_code: String = ""
 var is_syncing_scroll: bool = false
 
@@ -117,8 +119,8 @@ func _enter_tree() -> void:
 	auto_insert_checkbox.button_pressed = true
 
 	input_line = LineEdit.new()
-	input_line.placeholder_text = "Request an offering to T.A.L.O.S..."
-
+	input_line.placeholder_text = "Request an offering to T.A.L.O.S...(Press Enter)"
+	input_line.text_submitted.connect(func(_new_text: String): _on_send_button_pressed())
 	http_node = HTTPRequest.new()
 
 	dock.add_child(output_box)
@@ -196,20 +198,32 @@ func _exit_tree() -> void:
 func _setup_diff_viewer_window() -> void:
 	diff_window = AcceptDialog.new()
 	diff_window.title = "⚖️ T.A.L.O.S Before & After Script Comparison"
-	diff_window.min_size = Vector2i(960, 640)
+	diff_window.min_size = Vector2i(980, 650)
 	diff_window.ok_button_text = "Inject Full Offering"
 	diff_window.confirmed.connect(_on_diff_window_confirmed)
 
 	# Custom Action Button for Partial Selection Injection
 	diff_inject_partial_btn = diff_window.add_button(
-		"Inject Highlighted Selection Only", false, "inject_partial"
-	)
+		"Inject Highlighted Selection Only", false, "inject_partial")
 	diff_inject_partial_btn.disabled = true
 	diff_window.custom_action.connect(_on_diff_custom_action)
 
 	var main_vbox = VBoxContainer.new()
 	main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	main_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+
+	var top_bar = HBoxContainer.new()
+	var selector_lbl = Label.new()
+	selector_lbl.text = "Active Generated Block: "
+
+	diff_block_selector = OptionButton.new()
+	diff_block_selector.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	diff_block_selector.item_selected.connect(_on_diff_block_selected)
+
+	top_bar.add_child(selector_lbl)
+	top_bar.add_child(diff_block_selector)
+	main_vbox.add_child(top_bar)
+
 
 	var header_lbl = Label.new()
 	header_lbl.text = (
@@ -222,7 +236,7 @@ func _setup_diff_viewer_window() -> void:
 	var hsplit = HSplitContainer.new()
 	hsplit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hsplit.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	hsplit.split_offset = 470
+	hsplit.split_offset = 480
 
 	# BEFORE Screen (Left Column Container)
 	var left_vbox = VBoxContainer.new()
@@ -233,7 +247,9 @@ func _setup_diff_viewer_window() -> void:
 	left_lbl.add_theme_color_override("font_color", Color(0.9, 0.5, 0.5))
 	diff_left_view = TextEdit.new()
 	diff_left_view.editable = false
+	diff_left_view.gutters_draw_line_numbers = true
 	diff_left_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_apply_gdscript_highlighter(diff_left_view)
 	left_vbox.add_child(left_lbl)
 	left_vbox.add_child(diff_left_view)
 
@@ -246,8 +262,10 @@ func _setup_diff_viewer_window() -> void:
 	right_lbl.add_theme_color_override("font_color", Color(0.4, 0.9, 0.6))
 	diff_right_view = TextEdit.new()
 	diff_right_view.editable = false
+	diff_right_view.gutters_draw_line_numbers = true
 	diff_right_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	diff_right_view.caret_changed.connect(_on_diff_right_selection_changed)
+	_apply_gdscript_highlighter(diff_right_view)
 	right_vbox.add_child(right_lbl)
 	right_vbox.add_child(diff_right_view)
 
@@ -327,43 +345,84 @@ func _build_simulated_after_code(original_code: String, incoming_code: String) -
 	lines[caret_line] = prefix_text + incoming_code + suffix_text
 	return "\n".join(lines)
 
+func _parse_blocks_array(raw_input: String) -> Array[String]:
+	var blocks : Array[String] = []
+	if not "```" in raw_input:
+		var cleaned = _clean_block_markers(raw_input)
+		if cleaned != "":
+			blocks.append(cleaned)
+		return blocks
+		
+	var lines = raw_input.split("\n")
+	var current_block = ""
+	var inside_block = false
+	
+	for line in lines:
+		if line.strip_edges().begins_with("```"):
+			if inside_block:
+				if current_block.strip_edges() != "":
+					blocks.append(current_block.strip_edges())
+				current_block = ""
+			inside_block = !inside_block
+			continue
+		if inside_block:
+			current_block += line + "\n"
+			
+	if blocks.is_empty() and raw_input.strip_edges() != "":
+		blocks.append(_clean_block_markers(raw_input))
+	return blocks
 
 func _trigger_diff_comparison_view(incoming_code: String) -> void:
-	pending_injection_code = incoming_code
+	parsed_code_blocks = _parse_blocks_array(incoming_code)
+	if parsed_code_blocks.is_empty():
+		return
+		
 	var original_code = ""
 	var script_editor = EditorInterface.get_script_editor()
 	if script_editor:
 		var current_script = script_editor.get_current_script()
 		if current_script:
 			original_code = current_script.source_code
-
-	var simulated_after_code = _build_simulated_after_code(original_code, incoming_code)
+			
 	diff_left_view.clear()
-	diff_right_view.clear()
 	diff_left_view.text = original_code
-	diff_right_view.text = simulated_after_code
-	diff_inject_partial_btn.disabled = true
-
-	var left_lines = original_code.split("\n")
-	var right_lines = simulated_after_code.split("\n")
-	var first_diff_line = -1
-	for i in range(left_lines.size()):
-		if i >= right_lines.size() or left_lines[i] != right_lines[i]:
-			diff_left_view.set_line_background_color(i, Color(0.55, 0.12, 0.12, 0.28))
-			if first_diff_line == -1:
-				first_diff_line = i
-	for j in range(right_lines.size()):
-		if j >= left_lines.size() or right_lines[j] != left_lines[j]:
-			diff_right_view.set_line_background_color(j, Color(0.12, 0.55, 0.22, 0.28))
-			if first_diff_line == -1:
-				first_diff_line = j
-
+	
+	# Populate Block Selector Dropdown
+	diff_block_selector.clear()
+	if parsed_code_blocks.size() > 1:
+		diff_block_selector.add_item("All Blocks Combined (%d blocks)" % parsed_code_blocks.size(), 0)
+		for i in range(parsed_code_blocks.size()):
+			diff_block_selector.add_item("Block %d Only" % (i + 1), i + 1)
+		diff_block_selector.select(1) # Default to Block 1 so you see individual blocks first
+		_on_diff_block_selected(1)
+	else:
+		diff_block_selector.add_item("Block 1 (Single Offering)", 0)
+		diff_block_selector.select(0)
+		_on_diff_block_selected(0)
+		
 	diff_window.popup_centered()
-	if first_diff_line > 0:
-		var target_scroll = max(0, first_diff_line - 3)
-		diff_left_view.scroll_vertical = target_scroll
-		diff_right_view.scroll_vertical = target_scroll
 
+func _on_diff_block_selected(index: int) -> void:
+	if parsed_code_blocks.is_empty():
+		return
+		
+	if parsed_code_blocks.size() > 1:
+		if index == 0:
+			pending_injection_code = "\n\n".join(parsed_code_blocks)
+		else:
+			pending_injection_code = parsed_code_blocks[index - 1]
+	else:
+		pending_injection_code = parsed_code_blocks[0]
+		
+	diff_right_view.clear()
+	diff_right_view.text = pending_injection_code
+	diff_inject_partial_btn.disabled = true
+	
+	# Highlight all lines in the right panel as proposed generated code
+	for j in range(diff_right_view.get_line_count()):
+		diff_right_view.set_line_background_color(j, Color(0.12, 0.55, 0.22, 0.25))
+		
+	diff_right_view.scroll_vertical = 0
 
 func _on_diff_custom_action(action_name: StringName) -> void:
 	if action_name == &"inject_partial":
@@ -855,13 +914,15 @@ func _handle_generation_response(response_code: int, body: PackedByteArray) -> v
 		var response_data = json.get_data()
 		if response_data is Dictionary and response_data.has("response"):
 			var ai_raw_response = response_data["response"]
-			var clean_code = _extract_code_blocks(ai_raw_response)
-			output_box.text = clean_code
-			_write_to_offline_cache(running_request_hash, clean_code)
+			var display_blocks = _extract_code_blocks(ai_raw_response)
+			var injectable_code = _clean_block_markers(display_blocks)
+			
+			output_box.text = display_blocks
+			_write_to_offline_cache(running_request_hash, injectable_code)
 			_show_ui_notification_banner("Generation Finished & Cached.", Color(0.1, 0.8, 0.5))
-			DisplayServer.clipboard_set(clean_code)
+			DisplayServer.clipboard_set(injectable_code)
 			if auto_insert_checkbox.button_pressed:
-				_trigger_diff_comparison_view(clean_code)
+				_trigger_diff_comparison_view(injectable_code)
 
 
 func _execute_offline_fallback_procedure(reason_string: String) -> void:
@@ -901,21 +962,40 @@ func _execute_offline_fallback_procedure(reason_string: String) -> void:
 			_set_status_color(Color(0.9, 0.2, 0.2))
 
 
-func _extract_code_blocks(raw_input: String) -> String:
-	if "```" not in raw_input:
-		return raw_input.strip_edges()
 
+func _extract_code_blocks(raw_input : String) -> String:
+	if not "```" in raw_input:
+		return raw_input.strip_edges()
 	var lines = raw_input.split("\n")
-	var extracted_code = ""
+	var blocks : Array[String] = []
+	var current_block = ""
 	var inside_block = false
+	
 	for line in lines:
-		if line.begins_with("```"):
-			inside_block = not inside_block
+		if line.strip_edges().begins_with("```"):
+			if inside_block:
+				if current_block.strip_edges() != "":
+					blocks.append(current_block.strip_edges())
+				current_block = ""
+			inside_block = !inside_block
 			continue
 		if inside_block:
-			extracted_code += line + "\n"
-	return extracted_code.strip_edges()
+			current_block += line + "\n"
+			
+	if blocks.size() <= 1:
+		return blocks[0] if blocks.size() == 1 else raw_input.strip_edges()
+		
+	var formatted_output = ""
+	for i in range(blocks.size()):
+		formatted_output += "# === [ BLOCK %d ] ===\n%s\n\n" % [i + 1, blocks[i]]
+	return formatted_output.strip_edges()
 
+func _clean_block_markers(code_text: String) -> String:
+	var clean_lines : Array[String] = []
+	for line in code_text.split("\n"):
+		if not line.strip_edges().begins_with("# === [ BLOCK "):
+			clean_lines.append(line)
+	return "\n".join(clean_lines).strip_edges()
 
 func _insert_code_into_active_editor(code_to_insert: String) -> void:
 	var target_edit = _get_active_script_text_edit()
