@@ -178,7 +178,7 @@ func _enter_tree() -> void:
 	add_control_to_dock(EditorPlugin.DOCK_SLOT_RIGHT_BR, main_tabs)
 	print("talos UI framework deployed successfully.")
 
-	callable(_fetch_local_ollama_models).call_deferred()
+	_fetch_local_ollama_models.call_deferred()
 	_refresh_history_list()
 
 
@@ -299,30 +299,33 @@ func _on_right_h_scroll(val: float) -> void:
 
 func _on_diff_right_selection_changed() -> void:
 	if diff_inject_partial_btn and diff_right_view:
-		var has_sel = (
+		var has_selection = (
 			diff_right_view.has_selection()
 			and diff_right_view.get_selected_text().strip_edges() != ""
 		)
-		diff_inject_partial_btn.disabled = not has_sel
+		diff_inject_partial_btn.disabled = not has_selection
 
 
 func _build_simulated_after_code(original_code: String, incoming_code: String) -> String:
 	if original_code.strip_edges() == "":
 		return incoming_code
-		var active_edit = _get_active_script_text_edit()
-		if not active_edit:
-			return original_code + "\n\n" + incoming_code
-			var lines = original_code.split("\n")
-			var caret_line = clampi(active_edit.get_caret_line(), 0, max(0, lines.size() - 1))
-			var caret_col = active_edit.get_caret_column()
-			if lines.size() == 0:
-				return incoming_code
-				var target_line = lines[caret_line]
-				var safe_col = clampi(caret_col, 0, target_line.length())
-				var prefix = target_line.substr(0, safe_col)
-				var suffix = target_line.substr(safe_col)
-				lines[caret_line] = prefix + incoming_code + suffix
-				return "\n".join(lines)
+
+	var active_edit = _get_active_script_text_edit()
+	if not active_edit:
+		return original_code + "\n\n" + incoming_code
+
+	var lines = original_code.split("\n")
+	if lines.is_empty():
+		return incoming_code
+
+	var caret_line = clampi(active_edit.get_caret_line(), 0, lines.size() - 1)
+	var caret_col = active_edit.get_caret_column()
+	var target_line = lines[caret_line]
+	var safe_col = clampi(caret_col, 0, target_line.length())
+	var prefix_text = target_line.substr(0, safe_col)
+	var suffix_text = target_line.substr(safe_col)
+	lines[caret_line] = prefix_text + incoming_code + suffix_text
+	return "\n".join(lines)
 
 
 func _trigger_diff_comparison_view(incoming_code: String) -> void:
@@ -333,33 +336,33 @@ func _trigger_diff_comparison_view(incoming_code: String) -> void:
 		var current_script = script_editor.get_current_script()
 		if current_script:
 			original_code = current_script.source_code
-			var simulated_after_code = _build_simulated_after_code(original_code, incoming_code)
-			diff_left_view.clear()
-			diff_right_view.clear()
-			diff_left_view.text = original_code
-			diff_right_view.text = simulated_after_code
-			diff_inject_partial_btn.disabled = true
-			var left_lines = original_code.split("\n")
-			var right_lines = simulated_after_code.split("\n")
-			var first_diff_line = -1
-			for i in range(left_lines.size()):
-				if i >= right_lines.size() or left_lines[i] != right_lines[i]:
-					diff_left_view.set_line_background_color(i, Color(0.55, 0.12, 0.12, 0.28))
-					if first_diff_line == -1:
-						first_diff_line = i
-					for j in range(right_lines.size()):
-						if j >= left_lines.size() or right_lines[j] != left_lines[j]:
-							diff_right_view.set_line_background_color(
-								j, Color(0.12, 0.55, 0.22, 0.28)
-							)
-							if first_diff_line == -1:
-								first_diff_line = j
-							diff_window.popup_centered()
-							# Auto-scroll both windows to the first modified line
-							if first_diff_line > 0:
-								var target_scroll = max(0, first_diff_line - 3)
-								diff_left_view.scroll_vertical = target_scroll
-								diff_right_view.scroll_vertical = target_scroll
+
+	var simulated_after_code = _build_simulated_after_code(original_code, incoming_code)
+	diff_left_view.clear()
+	diff_right_view.clear()
+	diff_left_view.text = original_code
+	diff_right_view.text = simulated_after_code
+	diff_inject_partial_btn.disabled = true
+
+	var left_lines = original_code.split("\n")
+	var right_lines = simulated_after_code.split("\n")
+	var first_diff_line = -1
+	for i in range(left_lines.size()):
+		if i >= right_lines.size() or left_lines[i] != right_lines[i]:
+			diff_left_view.set_line_background_color(i, Color(0.55, 0.12, 0.12, 0.28))
+			if first_diff_line == -1:
+				first_diff_line = i
+	for j in range(right_lines.size()):
+		if j >= left_lines.size() or right_lines[j] != left_lines[j]:
+			diff_right_view.set_line_background_color(j, Color(0.12, 0.55, 0.22, 0.28))
+			if first_diff_line == -1:
+				first_diff_line = j
+
+	diff_window.popup_centered()
+	if first_diff_line > 0:
+		var target_scroll = max(0, first_diff_line - 3)
+		diff_left_view.scroll_vertical = target_scroll
+		diff_right_view.scroll_vertical = target_scroll
 
 
 func _on_diff_custom_action(action_name: StringName) -> void:
@@ -379,13 +382,14 @@ func _on_diff_window_confirmed() -> void:
 			_show_ui_notification_banner(
 				"Full offering committed via Before/After Diff.", Color(0.1, 0.8, 0.5)
 			)
-			pending_injection_code = ""
+		pending_injection_code = ""
 
 
 func _show_ui_notification_banner(message: String, accent_color: Color) -> void:
 	var script_editor = EditorInterface.get_script_editor()
 	if not script_editor:
 		return
+
 	var banner = PanelContainer.new()
 	var style = StyleBoxFlat.new()
 	style.bg_color = Color(0.12, 0.12, 0.16, 0.95)
@@ -396,22 +400,25 @@ func _show_ui_notification_banner(message: String, accent_color: Color) -> void:
 	banner.add_theme_stylebox_override("panel", style)
 	banner.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	banner.custom_minimum_size = Vector2(400, 45)
+
 	var margin = MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 15)
 	margin.add_theme_constant_override("margin_right", 15)
+
 	var label = Label.new()
-	label.text = "⚡ T.A.L.O.S: " + message
+	label.text = "T.A.L.O.S: " + message
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	label.add_theme_color_override("font_color", Color(0.95, 0.95, 0.95))
 	margin.add_child(label)
 	banner.add_child(margin)
+
 	script_editor.add_child(banner)
 	banner.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE, Control.PRESET_MODE_MINSIZE)
 	banner.offset_top = 10
 	var banner_timer = script_editor.get_tree().create_timer(3.2)
 	banner_timer.timeout.connect(
-		func():
+		func() -> void:
 			if is_instance_valid(banner):
 				banner.queue_free()
 	)
@@ -420,13 +427,14 @@ func _show_ui_notification_banner(message: String, accent_color: Color) -> void:
 func _run_code_diagnostics(code_to_verify: String) -> bool:
 	if code_to_verify.strip_edges() == "":
 		return false
-	# Combine with active script context so partial snippets compile cleanly during syntax checks
+
 	var full_test_source = code_to_verify
 	var script_editor = EditorInterface.get_script_editor()
 	if script_editor and script_editor.get_current_script():
 		full_test_source = _build_simulated_after_code(
 			script_editor.get_current_script().source_code, code_to_verify
 		)
+
 	var dynamic_script = GDScript.new()
 	dynamic_script.source_code = full_test_source
 	var compilation_error = dynamic_script.reload()
@@ -455,38 +463,38 @@ func get_next_backup_index() -> int:
 			):
 				var structures = file_name.split("_")
 				if structures.size() > 1:
-					var index_val = structures[1].to_int()
-					if index_val > highest_index:
-						highest_index = index_val
-						file_name = dir.get_next()
-						return highest_index + 1
+					var index_value = structures[1].to_int()
+					if index_value > highest_index:
+						highest_index = index_value
+			file_name = dir.get_next()
+	return highest_index + 1
 
 
 func _write_to_offline_cache(_hash_signature: String, code_content: String) -> void:
 	if code_content.strip_edges() == "":
 		return
-	var next_idx = _get_next_backup_index()
+	var next_index = get_next_backup_index()
 	var time_dict = Time.get_time_dict_from_system()
 	var time_stamp = "%02d-%02d" % [time_dict["hour"], time_dict["minute"]]
-	var custom_backup_filename = "Backup_%04d_%s" % [next_idx, time_stamp]
+	var custom_backup_filename = "Backup_%04d_%s" % [next_index, time_stamp]
 	var path = CACHE_DIR + custom_backup_filename + ".cache"
 	var file = FileAccess.open(path, FileAccess.WRITE)
 	if file:
 		file.store_string(code_content)
 		file.close()
-		_refresh_history_list()
+	_refresh_history_list()
 
 
 func _read_from_offline_cache(filename_signature: String) -> String:
 	var path = CACHE_DIR + filename_signature + ".cache"
 	if not FileAccess.file_exists(path):
 		return ""
-		var file = FileAccess.open(path, FileAccess.READ)
-		if file:
-			var contents = file.get_as_text()
-			file.close()
-			return contents
-			return ""
+	var file = FileAccess.open(path, FileAccess.READ)
+	if file:
+		var contents = file.get_as_text()
+		file.close()
+		return contents
+	return ""
 
 
 func _on_clear_cache_pressed() -> void:
@@ -499,16 +507,14 @@ func _on_clear_cache_pressed() -> void:
 			if not dir.current_is_dir() and file_name.ends_with(".cache"):
 				dir.remove(file_name)
 				count += 1
-				file_name = dir.get_next()
-				if status_label:
-					status_label.text = "Status: Purged %d Cached Files" % count
-					_set_status_color(Color(0.9, 0.3, 0.3))
-					_show_ui_notification_banner(
-						"Cache system cleared completely.", Color(0.9, 0.3, 0.3)
-					)
-					_refresh_history_list()
-					if history_preview:
-						history_preview.text = ""
+			file_name = dir.get_next()
+		if status_label:
+			status_label.text = "Status: Purged %d Cached Files" % count
+			_set_status_color(Color(0.9, 0.3, 0.3))
+		_show_ui_notification_banner("Cache system cleared completely.", Color(0.9, 0.3, 0.3))
+		_refresh_history_list()
+		if history_preview:
+			history_preview.text = ""
 
 
 func _refresh_history_list() -> void:
@@ -525,15 +531,14 @@ func _refresh_history_list() -> void:
 				var raw_filename = file_name.replace(".cache", "")
 				history_hashes.append(raw_filename)
 				history_list.add_item(raw_filename)
-				file_name = dir.get_next()
+			file_name = dir.get_next()
 
 
 func _on_history_item_selected(index: int) -> void:
 	if index >= history_hashes.size() or not history_preview:
 		return
 	var target_filename = history_hashes[index]
-	var cached_code = _read_from_offline_cache(target_filename)
-	history_preview.text = cached_code
+	history_preview.text = _read_from_offline_cache(target_filename)
 	if history_insert_button:
 		history_insert_button.disabled = false
 
@@ -556,8 +561,7 @@ func _init_editor_settings_configs() -> void:
 			"name": SETTING_SHORTCUT,
 			"type": TYPE_STRING,
 			"hint": PROPERTY_HINT_NONE,
-			"hint_string":
-			"The alpha key triggered alongside Ctrl+Shift to force T.A.L.O.S invocations"
+			"hint_string": "The alpha key triggered alongside Ctrl+Shift",
 		}
 		ProjectSettings.add_property_info(property_info)
 		ProjectSettings.save()
@@ -580,6 +584,7 @@ func _apply_segmented_style(bar: ProgressBar) -> void:
 	bg_style.corner_radius_bottom_left = 4
 	bg_style.corner_radius_top_right = 4
 	bg_style.corner_radius_bottom_right = 4
+
 	var fg_style = StyleBoxFlat.new()
 	fg_style.bg_color = Color(0.0, 0.75, 0.65, 1.0)
 	fg_style.border_width_right = 3
@@ -599,8 +604,8 @@ func _on_progress_tick() -> void:
 	if progress_bar:
 		if progress_bar.value >= progress_bar.max_value:
 			progress_bar.value = 0
-	else:
-		progress_bar.value += progress_bar.step
+		else:
+			progress_bar.value += progress_bar.step
 
 
 func _fetch_local_ollama_models() -> void:
@@ -642,7 +647,7 @@ func _load_local_xml_docs(class_name_str: String) -> String:
 			elif node_type == XMLParser.NODE_TEXT and inside_description:
 				var text = parser.get_node_data().strip_edges()
 				if text != "":
-					doc_context += "Class Description : %s\n" % text
+					doc_context += "Class Description: %s\n" % text
 				inside_description = false
 			elif node_type == XMLParser.NODE_ELEMENT_END and node_name == "description":
 				inside_description = false
@@ -674,7 +679,7 @@ func _get_deep_scene_context() -> String:
 						or line.begins_with("func")
 					):
 						scene_context += "     | %s\n" % line.strip_edges()
-						line_count += 1
+					line_count += 1
 	return scene_context
 
 
@@ -747,8 +752,7 @@ func _on_send_button_pressed() -> void:
 	var project_context = _get_editor_context()
 	var system_prompt = (
 		"You are T.A.L.O.S, a local computational system. "
-		+ "You are a strict Godot 4.4 engine expert that explains thoroughly. "
-		+ "Return only clean code blocks."
+		+ "You are a strict Godot 4.4 engine expert. Return only clean code blocks."
 	)
 	var combined_prompt = (
 		"CONTEXT Strings:\n" + project_context + "\n\nUSER REQUEST: " + user_prompt
@@ -763,40 +767,40 @@ func _on_send_button_pressed() -> void:
 		"options": {"temperature": 0.1},
 	}
 	var headers = ["Content-Type: application/json"]
-	var request_err = http_node.request(
+	var request_error = http_node.request(
 		OLLAMA_URL, headers, HTTPClient.METHOD_POST, JSON.stringify(body)
 	)
-	if request_err != OK:
+	if request_error != OK:
 		_execute_offline_fallback_procedure("HTTP Engine Request Failure")
 
 
 func _on_cancel_button_pressed() -> void:
 	if http_node.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
 		http_node.cancel()
-		if progress_timer:
-			progress_timer.stop()
-		if progress_bar:
-			progress_bar.value = 0
-		if send_button:
-			send_button.disabled = false
-		if cancel_button:
-			cancel_button.disabled = true
-		if clear_cache_button:
-			clear_cache_button.disabled = false
-		if model_select_menu:
-			model_select_menu.disabled = false
-		output_box.text = "Forging Process Aborted."
-		if status_label:
-			status_label.text = "Status: Aborted"
-			_set_status_color(Color(0.9, 0.6, 0.2))
+	if progress_timer:
+		progress_timer.stop()
+	if progress_bar:
+		progress_bar.value = 0
+	if send_button:
+		send_button.disabled = false
+	if cancel_button:
+		cancel_button.disabled = true
+	if clear_cache_button:
+		clear_cache_button.disabled = false
+	if model_select_menu:
+		model_select_menu.disabled = false
+	output_box.text = "Forging Process Aborted."
+	if status_label:
+		status_label.text = "Status: Aborted"
+		_set_status_color(Color(0.9, 0.6, 0.2))
 
 
 func _on_http_routing_coordinator(
 	_result: int, response_code: int, _header: PackedStringArray, body: PackedByteArray
 ) -> void:
-	var raw_str = body.get_string_from_utf8()
+	var raw_string = body.get_string_from_utf8()
 	var json = JSON.new()
-	if json.parse(raw_str) == OK:
+	if json.parse(raw_string) == OK:
 		var parsed = json.get_data()
 		if parsed is Dictionary and parsed.has("models"):
 			_process_tags_response(response_code, parsed)
@@ -814,9 +818,9 @@ func _process_tags_response(response_code: int, data: Dictionary) -> void:
 
 	model_select_menu.clear()
 	var models_list = data["models"]
-	for m in models_list:
-		if m.has("name"):
-			model_select_menu.add_item(m["name"])
+	for model in models_list:
+		if model.has("name"):
+			model_select_menu.add_item(model["name"])
 	if model_select_menu.item_count > 0:
 		model_select_menu.select(0)
 		selected_model_name = model_select_menu.get_item_text(0)
@@ -849,7 +853,7 @@ func _handle_generation_response(response_code: int, body: PackedByteArray) -> v
 	var json = JSON.new()
 	if json.parse(body.get_string_from_utf8()) == OK:
 		var response_data = json.get_data()
-		if response_data.has("response"):
+		if response_data is Dictionary and response_data.has("response"):
 			var ai_raw_response = response_data["response"]
 			var clean_code = _extract_code_blocks(ai_raw_response)
 			output_box.text = clean_code
@@ -860,7 +864,7 @@ func _handle_generation_response(response_code: int, body: PackedByteArray) -> v
 				_trigger_diff_comparison_view(clean_code)
 
 
-func _execute_offline_fallback_procedure(reason_str: String) -> void:
+func _execute_offline_fallback_procedure(reason_string: String) -> void:
 	if progress_timer:
 		progress_timer.stop()
 	if send_button:
@@ -871,6 +875,7 @@ func _execute_offline_fallback_procedure(reason_str: String) -> void:
 		clear_cache_button.disabled = false
 	if model_select_menu:
 		model_select_menu.disabled = false
+
 	var cached_script = _read_from_offline_cache(running_request_hash)
 	if cached_script != "":
 		if progress_bar:
@@ -889,7 +894,7 @@ func _execute_offline_fallback_procedure(reason_str: String) -> void:
 		if progress_bar:
 			progress_bar.value = 0
 		output_box.text = (
-			"Error: Ollama Host Unreachable (%s).\nNo cache matches found." % reason_str
+			"Error: Ollama Host Unreachable (%s).\nNo cache matches found." % reason_string
 		)
 		if status_label:
 			status_label.text = "Status: Core Offline & Cache Miss"
@@ -897,20 +902,18 @@ func _execute_offline_fallback_procedure(reason_str: String) -> void:
 
 
 func _extract_code_blocks(raw_input: String) -> String:
-	if not "```" in raw_input:
+	if "```" not in raw_input:
 		return raw_input.strip_edges()
 
 	var lines = raw_input.split("\n")
 	var extracted_code = ""
 	var inside_block = false
-
 	for line in lines:
 		if line.begins_with("```"):
 			inside_block = not inside_block
 			continue
 		if inside_block:
 			extracted_code += line + "\n"
-
 	return extracted_code.strip_edges()
 
 
