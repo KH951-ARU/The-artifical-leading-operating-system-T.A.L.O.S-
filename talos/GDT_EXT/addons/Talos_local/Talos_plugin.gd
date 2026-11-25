@@ -11,6 +11,7 @@ const SETTING_SHORTCUT = "plugins/talos/shortcut_key"
 var main_tabs: TabContainer
 var dock: VBoxContainer
 var history_panel: VBoxContainer
+var manual_pannel : VBoxContainer
 
 # Forging Tab Elements
 var output_box: TextEdit
@@ -65,6 +66,7 @@ func _enter_tree() -> void:
 
 	output_box = TextEdit.new()
 	output_box.editable = false
+	_apply_gdscript_highligher(output_box)
 	output_box.placeholder_text = " talos output will appear here.."
 	output_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
@@ -149,6 +151,7 @@ func _enter_tree() -> void:
 	history_list.item_selected.connect(_on_history_item_selected)
 
 	history_preview = TextEdit.new()
+	_apply_gdscript_highligher(history_preview)
 	history_preview.editable = false
 	history_preview.placeholder_text = "Select a historical script signature module to preview..."
 	history_preview.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -167,6 +170,9 @@ func _enter_tree() -> void:
 	main_tabs.add_child(dock)
 	main_tabs.add_child(history_panel)
 
+	_build_manual_tab()
+	main_tabs.add_child(manual_pannel)
+	
 	# Initialise Dynamic Comparative Layout Subsystems
 	_setup_diff_viewer_window()
 
@@ -183,6 +189,115 @@ func _enter_tree() -> void:
 	_fetch_local_ollama_models.call_deferred()
 	_refresh_history_list()
 
+func _build_manual_tab() -> void:
+		manual_pannel = VBoxContainer.new()
+		manual_pannel.name = "Manual"
+		manual_pannel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		manual_pannel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	
+		var manual_text = RichTextLabel.new()
+		manual_pannel.bbcode_enabled = true
+		manual_pannel.fit_content = false
+		manual_pannel.scroll_active = true
+		manual_pannel.selection_enabled = true
+		manual_pannel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		manual_pannel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	
+		manual_text.text = """[b][color = #4dd0e1] T.A.L.O.S --- OPERATIONS MANUAL[/color][/b]
+		[color = #90a4ae]Local Ollama GDScript Assistant[/color]
+		
+		[b][color = #81c784]1. QUICKSTART[/color][/b]
+		Ensure [b]Ollama[/b] is running locally on port [code]11434[/code].
+		• Open a [code].gd[/code] script and place your cursor where you want code inserted.
+		• Select an installed model from the [b]Model[/b] dropdown.
+		• Type a request in the bottom bar and press [b]Enter[/b] or click [b]Offer Prompt[/b].
+
+		[b][color=#81c784]2. SELECTION-AS-PROMPT[/color][/b]
+		• Leave the prompt input box blank.
+		• Highlight lines of code inside the Godot Script Editor.
+		• Click [b]Offer Prompt[/b] or press [b]Ctrl + Shift + T[/b] to send your selection directly.
+
+		[b][color=#81c784]3. BEFORE & AFTER DIFF SCREEN[/color][/b]
+		• [b]Active Block Dropdown:[/b] Switch between individual generated blocks ([i]Block 1 Only[/i], [i]Block 2 Only[/i]) or view all blocks combined.
+		• [b]Inject Selected Block at Caret:[/b] Runs a GDScript syntax check and inserts the active block at your cursor.
+		• [b]Inject Highlighted Selection Only:[/b] Drag-select specific lines in the [b]AFTER[/b] panel to insert just that chunk.
+		• [b]Replace Entire Script:[/b] Overwrites the entire active script after passing syntax validation.
+
+		[b][color=#81c784]4. OFFLINE CACHE & HISTORY[/color][/b]
+		• Every generation is saved in [code]user://talos_cache/[/code] and copied to your clipboard.
+		• Use the [b]History Modules[/b] tab to preview and re-inject previous outputs anytime.
+		• Click [b]Clear Cache Database[/b] to delete all saved [code].cache[/code] files.
+
+		[b][color=#81c784]5. SHORTCUTS & SETTINGS[/color][/b]
+		• [b]Enter:[/b] Submit prompt from input bar.
+		• [b]Ctrl + Shift + T:[/b] Trigger T.A.L.O.S from anywhere in the editor.
+		• Customize the trigger key under [b]Project Settings > Plugins > Talos > Shortcut Key[/b] (enable [i]Advanced Settings[/i])."""
+		
+		
+		manual_pannel.add_child(manual_text)
+		var manual_btn_box = HBoxContainer.new()
+		manual_btn_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	
+		var ping_ollama_btn = Button.new()
+		ping_ollama_btn.text = "Test Ollama Connection"
+		ping_ollama_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		ping_ollama_btn.pressed.connect(_on_test_ollama_connection_pressed)
+	
+	
+		var copy_diag_btn = Button.new()
+		copy_diag_btn.text = "Copy Troubleshooting Info"
+		copy_diag_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		copy_diag_btn.pressed.connect(_on_copy_troubleshooting_pressed)
+	
+		manual_pannel.add_child(copy_diag_btn)
+		manual_pannel.add_child(ping_ollama_btn)
+		manual_pannel.add_child(manual_btn_box)
+
+func _on_copy_troubleshooting_pressed() -> void:
+	var godot_ver = Engine.get_version_info().get("string", "Unknown")
+	var shortcut_key = ProjectSettings.get_setting(SETTING_SHORTCUT, "T")
+	var current_status = status_label.text if status_label else "Unknown"
+	
+	var active_script_path = "None"
+	var script_editor = EditorInterface.get_script_editor()
+	if script_editor and script_editor.get_current_script():
+		active_script_path = script_editor.get_current_script().resource_path
+		
+	var diag_report = (
+		"=== T.A.L.O.S Diagnostic Report ===\n"
+		+ "Godot Version: %s\n" % godot_ver
+		+ "Ollama Endpoint: %s\n" % OLLAMA_URL
+		+ "Selected Model: %s\n" % selected_model_name
+		+ "Current Status: %s\n" % current_status
+		+ "Shortcut Key: Ctrl + Shift + %s\n" % shortcut_key
+		+ "Cached Modules: %d\n" % history_hashes.size()
+		+ "Active Script: %s\n" % active_script_path
+		+ "==================================="
+	)
+	
+	DisplayServer.clipboard_set(diag_report)
+	_show_ui_notification_banner("Troubleshooting report copied to clipboard.", Color(0.2, 0.75, 0.95))
+
+func _on_test_ollama_connection_pressed() -> void:
+	if not http_node:
+		return
+		
+	if http_node.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
+		_show_ui_notification_banner("HTTP client busy. Finish or abort current request first.", Color(0.9, 0.6, 0.2))
+		return
+		
+	if status_label:
+		status_label.text = "Status: Pinging Ollama server..."
+		_set_status_color(Color(0.8, 0.5, 0.1))
+		
+	var error = http_node.request(OLLAMA_TAGS_URL, [], HTTPClient.METHOD_GET)
+	if error != OK:
+		if status_label:
+			status_label.text = "Status: Connection Failed (Error %d)" % error
+			_set_status_color(Color(0.9, 0.2, 0.2))
+		_show_ui_notification_banner("Failed to reach Ollama at %s." % OLLAMA_TAGS_URL, Color(0.9, 0.2, 0.2))
+	else:
+		_show_ui_notification_banner("Ping sent to Ollama. Check Status label for result.", Color(0.2, 0.75, 0.95))
 
 func _exit_tree() -> void:
 	if main_tabs:
@@ -249,7 +364,7 @@ func _setup_diff_viewer_window() -> void:
 	diff_left_view.editable = false
 	diff_left_view.gutters_draw_line_numbers = true
 	diff_left_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_apply_gdscript_highlighter(diff_left_view)
+	_apply_gdscript_highligher(diff_left_view)
 	left_vbox.add_child(left_lbl)
 	left_vbox.add_child(diff_left_view)
 
@@ -265,7 +380,7 @@ func _setup_diff_viewer_window() -> void:
 	diff_right_view.gutters_draw_line_numbers = true
 	diff_right_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	diff_right_view.caret_changed.connect(_on_diff_right_selection_changed)
-	_apply_gdscript_highlighter(diff_right_view)
+	_apply_gdscript_highligher(diff_right_view)
 	right_vbox.add_child(right_lbl)
 	right_vbox.add_child(diff_right_view)
 
@@ -282,6 +397,53 @@ func _setup_diff_viewer_window() -> void:
 
 	EditorInterface.get_base_control().add_child(diff_window)
 
+func _apply_gdscript_highligher(target_edit : TextEdit) -> void:
+	if not target_edit:
+		return
+	
+	var highlighter = CodeHighlighter.new()
+	
+	# Base token colors
+	highlighter.number_color = Color(0.63, 1.0, 0.88)
+	highlighter.symbol_color = Color(0.67, 0.79, 1.0)
+	highlighter.function_color = Color(0.34, 0.7, 1.0)
+	highlighter.member_variable_color = Color(0.73, 0.88, 1.0)
+	
+	# Control flow keywords (pink/red)
+	var control_keywords = [
+		"if", "elif", "else", "for", "while", "match", 
+		"break", "continue", "pass", "return", "await", "yield"
+	]
+	for kw in control_keywords:
+		highlighter.add_keyword_color(kw, Color(1.0, 0.44, 0.52))
+		
+	# Declaration & logic keywords (coral/orange)
+	var decl_keywords = [
+		"func", "var", "const", "signal", "enum", "class", 
+		"class_name", "extends", "static", "true", "false", 
+		"null", "self", "super", "and", "or", "not", "in", "is", "as"
+	]
+	for kw in decl_keywords:
+		highlighter.add_keyword_color(kw, Color(1.0, 0.55, 0.45))
+		
+	# Built-in Godot types (teal/green)
+	var builtin_types = [
+		"void", "bool", "int", "float", "String", "StringName",
+		"Vector2", "Vector2i", "Vector3", "Vector3i", "Color", "Rect2",
+		"Node", "Node2D", "Node3D", "Control", "Array", "Dictionary",
+		"PackedStringArray", "PackedByteArray"
+	]
+	for t in builtin_types:
+		highlighter.add_keyword_color(t, Color(0.26, 0.85, 0.72))
+		
+	# Comments, Strings, and @Annotations
+	highlighter.add_color_region("#", "", Color(0.5, 0.55, 0.6), true)
+	highlighter.add_color_region("\"", "\"", Color(1.0, 0.93, 0.63), false)
+	highlighter.add_color_region("'", "'", Color(1.0, 0.93, 0.63), false)
+	highlighter.add_color_region("@", " ", Color(1.0, 0.7, 0.4), false)
+	
+	# Apply to the TextEdit
+	target_edit.syntax_highlighter = highlighter
 
 func _on_left_v_scroll(val: float) -> void:
 	if is_syncing_scroll:
