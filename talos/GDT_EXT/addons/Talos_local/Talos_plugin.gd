@@ -33,8 +33,8 @@ var history_insert_button: Button
 
 # Live Diff Layout View Modules (Before & After Screen)
 var diff_window: AcceptDialog
-var diff_left_view: TextEdit
-var diff_right_view: TextEdit
+var diff_left_view: CodeEdit
+var diff_right_view: CodeEdit
 var diff_inject_partial_btn: Button
 var diff_block_selector : OptionButton
 var parsed_code_blocks : Array[String] = []
@@ -196,12 +196,12 @@ func _build_manual_tab() -> void:
 		manual_pannel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	
 		var manual_text = RichTextLabel.new()
-		manual_pannel.bbcode_enabled = true
-		manual_pannel.fit_content = false
-		manual_pannel.scroll_active = true
-		manual_pannel.selection_enabled = true
-		manual_pannel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		manual_pannel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		manual_text.bbcode_enabled = true
+		manual_text.fit_content = false
+		manual_text.scroll_active = true
+		manual_text.selection_enabled = true
+		manual_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		manual_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	
 		manual_text.text = """[b][color = #4dd0e1] T.A.L.O.S --- OPERATIONS MANUAL[/color][/b]
 		[color = #90a4ae]Local Ollama GDScript Assistant[/color]
@@ -360,7 +360,7 @@ func _setup_diff_viewer_window() -> void:
 	var left_lbl = Label.new()
 	left_lbl.text = "BEFORE (Current Active Script)"
 	left_lbl.add_theme_color_override("font_color", Color(0.9, 0.5, 0.5))
-	diff_left_view = TextEdit.new()
+	diff_left_view = CodeEdit.new()
 	diff_left_view.editable = false
 	diff_left_view.gutters_draw_line_numbers = true
 	diff_left_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -375,7 +375,7 @@ func _setup_diff_viewer_window() -> void:
 	var right_lbl = Label.new()
 	right_lbl.text = "AFTER (Simulated Result with T.A.L.O.S Offering)"
 	right_lbl.add_theme_color_override("font_color", Color(0.4, 0.9, 0.6))
-	diff_right_view = TextEdit.new()
+	diff_right_view = CodeEdit.new()
 	diff_right_view.editable = false
 	diff_right_view.gutters_draw_line_numbers = true
 	diff_right_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -997,7 +997,7 @@ func _on_send_button_pressed() -> void:
 
 func _on_cancel_button_pressed() -> void:
 	if http_node.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
-		http_node.cancel()
+		http_node.cancel_request()
 	if progress_timer:
 		progress_timer.stop()
 	if progress_bar:
