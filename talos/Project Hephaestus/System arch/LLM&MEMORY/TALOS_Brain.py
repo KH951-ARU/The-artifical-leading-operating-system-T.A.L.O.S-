@@ -453,7 +453,7 @@ if __name__ == "__main__":
                 replay_sample = dataset[-64:] + ([new_pair] * 16)
                 train_on_corpus(model, optimizer, tokenizer, replay_sample, steps=80, device=device, log_interval=40)
 
-            save_checkpoint(ckpt_path, model, optimizer, tokenizer, dataset)
+            save_checkpoint(checkpoint_path, model, optimizer, tokenizer, dataset)
 
             corrected = user_input[5:].strip()
             new_pair = f"{last_prompt_context}\nTalos: {corrected}\n"
