@@ -386,7 +386,7 @@ class TimeDomainFormantPlanner:
 
     def forward(self, phoneme_sequence, profile_override=None):
         prof = profile_override if profile_override else self.profile
-        trajectory = []
+        raw_trajectory = []
 
         spoken_tokens = [p for p in phoneme_sequence if not p.startswith('<')]
         total_spoken = max(1, len(spoken_tokens) - 1)
@@ -394,6 +394,11 @@ class TimeDomainFormantPlanner:
 
         active_base_pitch = prof.base_pitch_hz
         prev_f1, prev_f2, prev_f3 = 500.0, 1500.0, 2500.0
+        prev_voiced = False
+
+        # Clean list of phonemes without inline tags to look ahead at next sound
+        clean_phones = [p for p in phoneme_sequence if not p.startswith('<')]
+        clean_idx = 0
 
         for raw_phone in phoneme_sequence:
             if raw_phone.startswith('<pitch='):
@@ -404,7 +409,8 @@ class TimeDomainFormantPlanner:
                 ms = float(re.findall(r'\d+', raw_phone)[0])
                 n_frames = max(1, int(round(ms / self.frame_ms)))
                 for _ in range(n_frames):
-                    trajectory.append((active_base_pitch, prev_f1, prev_f2, prev_f3, 0.0, 0.0, 3000.0, 1000.0))
+                    raw_trajectory.append((active_base_pitch, prev_f1, prev_f2, prev_f3, 0.0, 0.0, 3000.0, 1000.0))
+                prev_voiced = False
                 continue
 
             stress = None
@@ -414,19 +420,27 @@ class TimeDomainFormantPlanner:
             else:
                 phone = raw_phone
 
+            # Look ahead to see if the next phoneme is also voiced (for legato blending)
+            next_voiced = False
+            if clean_idx + 1 < len(clean_phones):
+                nxt = clean_phones[clean_idx + 1]
+                nxt_base = nxt[:-1] if nxt[-1] in ('0', '1', '2') else nxt
+                nxt_physics = self.phoneme_physics.get(nxt_base)
+                if nxt_physics and nxt_physics[3] > 0.4:
+                    next_voiced = True
+            clean_idx += 1
+
             f1, f2, f3, v_gain, n_gain, fric_hz, fric_bw, base_ms = self.phoneme_physics.get(
                 phone, (500, 1500, 2500, 0.3, 0.2, 3000, 1200, 75)
             )
 
-            stress_pitch = 1.0
-            stress_dur = 1.0
-            stress_amp = 1.0
+            stress_pitch, stress_dur, stress_amp = 1.0, 1.0, 1.0
             if stress == 1:
-                stress_pitch, stress_dur, stress_amp = 1.13, 1.24, 1.15
+                stress_pitch, stress_dur, stress_amp = 1.12, 1.22, 1.12
             elif stress == 2:
-                stress_pitch, stress_dur, stress_amp = 1.05, 1.08, 1.05
+                stress_pitch, stress_dur, stress_amp = 1.05, 1.08, 1.04
             elif stress == 0:
-                stress_pitch, stress_dur, stress_amp = 0.95, 0.78, 0.85
+                stress_pitch, stress_dur, stress_amp = 0.96, 0.82, 0.88
                 f1 = 0.8 * f1 + 0.2 * 500.0
                 f2 = 0.8 * f2 + 0.2 * 1500.0
 
@@ -447,44 +461,54 @@ class TimeDomainFormantPlanner:
             declination = -prof.pitch_variance * 0.65 * progress
             phrase_pitch = active_base_pitch * (1.0 + arch + declination) * stress_pitch
 
+            is_voiced = v_gain > 0.4
+
             for t in range(n_frames):
                 frac = t / max(1, n_frames - 1)
-                # Smooth cosine coarticulation over first 45% of phoneme
-                glide = 0.5 - 0.5 * np.cos(np.pi * min(1.0, frac / 0.45))
+                # Smooth S-curve coarticulation across 65% of the phoneme
+                glide = 0.5 - 0.5 * np.cos(np.pi * min(1.0, frac / 0.65))
                 cur_f1 = (1.0 - glide) * prev_f1 + glide * target_f1
                 cur_f2 = (1.0 - glide) * prev_f2 + glide * target_f2
                 cur_f3 = (1.0 - glide) * prev_f3 + glide * target_f3
 
-                # Plosive closure silence followed by sharp release burst
+                # Legato envelope: keep vocal cords humming between connected voiced sounds
                 if phone in ['P', 'B', 'T', 'D', 'K', 'G']:
-                    if frac < 0.65:
+                    if frac < 0.60:
                         env = 0.02
                     elif frac < 0.82:
-                        env = 1.30
+                        env = 1.25
                     else:
                         env = 0.45
+                elif is_voiced:
+                    attack = min(1.0, frac / 0.20) if not prev_voiced else 1.0
+                    release = min(1.0, (1.0 - frac) / 0.20) if not next_voiced else 1.0
+                    env = (0.35 + 0.65 * min(attack, release)) * stress_amp
                 else:
-                    env = (np.sin(np.pi * (t + 0.5) / n_frames) ** 0.35) * stress_amp
+                    env = np.sin(np.pi * (t + 0.5) / n_frames) ** 0.35
 
-                syllable_arc = 1.0 + 0.035 * np.sin(np.pi * frac)
-                jitter = 1.0 + np.random.uniform(-prof.pitch_jitter, prof.pitch_jitter)
+                syllable_arc = 1.0 + 0.03 * np.sin(np.pi * frac)
+                jitter = 1.0 + np.random.uniform(-prof.pitch_jitter * 0.5, prof.pitch_jitter * 0.5)
                 cur_pitch = phrase_pitch * syllable_arc * jitter
 
-                trajectory.append((
-                    cur_pitch,
-                    cur_f1,
-                    cur_f2,
-                    cur_f3,
-                    v_gain * env,
-                    n_gain * env,
-                    fric_hz,
-                    fric_bw
+                raw_trajectory.append((
+                    cur_pitch, cur_f1, cur_f2, cur_f3,
+                    v_gain * env, n_gain * env, fric_hz, fric_bw
                 ))
 
-            if v_gain > 0:
+            if is_voiced:
                 prev_f1, prev_f2, prev_f3 = target_f1, target_f2, target_f3
+            prev_voiced = is_voiced
 
-        return trajectory
+        if not raw_trajectory:
+            return []
+
+        # Smooth parameter curves across time to eliminate frame-to-frame steps
+        arr = np.array(raw_trajectory, dtype=np.float64)
+        smooth_kernel = np.array([0.15, 0.2, 0.3, 0.2, 0.15])
+        for col in range(6):
+            arr[:, col] = np.convolve(arr[:, col], smooth_kernel, mode='same')
+
+        return [tuple(row) for row in arr]
 
     def _generate_harmonic_comb(self, pitch_hz):
         """Models a natural human glottal source with warm -12dB/octave spectral tilt."""
