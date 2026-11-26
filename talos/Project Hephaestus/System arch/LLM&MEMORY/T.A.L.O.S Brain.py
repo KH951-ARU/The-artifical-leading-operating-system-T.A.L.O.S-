@@ -173,7 +173,6 @@ class TalosMemory:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [m for sim, m in scored[:top_k] if sim > 0.15]
 
-
 # ==========================================
 # 4. ZERO-DEPENDENCY ACTION EXECUTION ENGINE
 # ==========================================
