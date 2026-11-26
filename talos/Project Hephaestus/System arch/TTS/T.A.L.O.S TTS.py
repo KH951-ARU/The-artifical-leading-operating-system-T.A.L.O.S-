@@ -67,40 +67,39 @@ class VoiceProfile:
     def presets(cls):
         return {
             "command": cls(
-                name="T.A.L.O.S. Natural Baritone (Human)",
-                base_pitch_hz=104.0,
-                speech_rate=0.98,
+                name="T.A.L.O.S. Crisp Baritone",
+                base_pitch_hz=106.0,
+                speech_rate=0.96,
                 pitch_variance=0.20,
-                word_pause_scale=1.05,
-                vocal_tract_scale=0.97,
-                breathiness=0.14,
-                pitch_jitter=0.012,
-                room_ambience=0.18,
+                word_pause_scale=1.10,
+                vocal_tract_scale=0.98,
+                breathiness=0.10,
+                pitch_jitter=0.010,
+                room_ambience=0.05
             ),
             "tactical": cls(
-                name="T.A.L.O.S. Clear Tenor (Conversational)",
-                base_pitch_hz=124.0,
-                speech_rate=1.08,
+                name="T.A.L.O.S. Clear Tenor",
+                base_pitch_hz=126.0,
+                speech_rate=1.05,
                 pitch_variance=0.22,
-                word_pause_scale=0.90,
+                word_pause_scale=0.95,
                 vocal_tract_scale=1.02,
-                breathiness=0.16,
-                pitch_jitter=0.014,
-                room_ambience=0.15,
+                breathiness=0.12,
+                pitch_jitter=0.012,
+                room_ambience=0.04
             ),
             "warm_alto": cls(
-                name="T.A.L.O.S. Warm Alto (Natural Female Register)",
+                name="T.A.L.O.S. Clear Alto",
                 base_pitch_hz=188.0,
-                speech_rate=1.02,
+                speech_rate=1.00,
                 pitch_variance=0.24,
-                word_pause_scale=0.95,
+                word_pause_scale=1.00,
                 vocal_tract_scale=1.14,
-                breathiness=0.18,
-                pitch_jitter=0.014,
-                room_ambience=0.18,
-            ),
+                breathiness=0.14,
+                pitch_jitter=0.012,
+                room_ambience=0.05
+            )
         }
-
 
 class TextToPhonemeEncoder:
     def __init__(self, cmudict_path=None, auto_download=True):
@@ -396,20 +395,25 @@ class TimeDomainFormantPlanner:
         prev_f1, prev_f2, prev_f3 = 500.0, 1500.0, 2500.0
         prev_voiced = False
 
-        # Clean list of phonemes without inline tags to look ahead at next sound
         clean_phones = [p for p in phoneme_sequence if not p.startswith('<')]
         clean_idx = 0
 
+        # Nasal anti-resonance zero frequencies (oral cavity side-branch absorption)
+        nasal_zeros = {'M': 1050.0, 'N': 1450.0, 'NG': 1850.0}
+
         for raw_phone in phoneme_sequence:
             if raw_phone.startswith('<pitch='):
-                active_base_pitch = float(re.findall(r'\d+', raw_phone)[0])
+                active_base_pitch = float(re.search(r'\d+', raw_phone).group())
                 continue
 
             if raw_phone.startswith('<pause='):
-                ms = float(re.findall(r'\d+', raw_phone)[0])
+                ms = float(re.search(r'\d+', raw_phone).group())
                 n_frames = max(1, int(round(ms / self.frame_ms)))
                 for _ in range(n_frames):
-                    raw_trajectory.append((active_base_pitch, prev_f1, prev_f2, prev_f3, 0.0, 0.0, 3000.0, 1000.0))
+                    raw_trajectory.append((
+                        active_base_pitch, prev_f1, prev_f2, prev_f3,
+                        0.0, 0.0, 3000.0, 1000.0, 0.0, 1200.0
+                    ))
                 prev_voiced = False
                 continue
 
@@ -420,7 +424,6 @@ class TimeDomainFormantPlanner:
             else:
                 phone = raw_phone
 
-            # Look ahead to see if the next phoneme is also voiced (for legato blending)
             next_voiced = False
             if clean_idx + 1 < len(clean_phones):
                 nxt = clean_phones[clean_idx + 1]
@@ -433,6 +436,11 @@ class TimeDomainFormantPlanner:
             f1, f2, f3, v_gain, n_gain, fric_hz, fric_bw, base_ms = self.phoneme_physics.get(
                 phone, (500, 1500, 2500, 0.3, 0.2, 3000, 1200, 75)
             )
+
+            # Determine nasal coupling and anti-resonance notch frequency
+            is_nasal = phone in nasal_zeros
+            target_nasal_mix = 0.85 if is_nasal else 0.0
+            target_anti_hz = nasal_zeros.get(phone, 1200.0) * prof.vocal_tract_scale
 
             stress_pitch, stress_dur, stress_amp = 1.0, 1.0, 1.0
             if stress == 1:
@@ -465,13 +473,11 @@ class TimeDomainFormantPlanner:
 
             for t in range(n_frames):
                 frac = t / max(1, n_frames - 1)
-                # Smooth S-curve coarticulation across 65% of the phoneme
                 glide = 0.5 - 0.5 * np.cos(np.pi * min(1.0, frac / 0.65))
                 cur_f1 = (1.0 - glide) * prev_f1 + glide * target_f1
                 cur_f2 = (1.0 - glide) * prev_f2 + glide * target_f2
                 cur_f3 = (1.0 - glide) * prev_f3 + glide * target_f3
 
-                # Legato envelope: keep vocal cords humming between connected voiced sounds
                 if phone in ['P', 'B', 'T', 'D', 'K', 'G']:
                     if frac < 0.60:
                         env = 0.02
@@ -492,7 +498,8 @@ class TimeDomainFormantPlanner:
 
                 raw_trajectory.append((
                     cur_pitch, cur_f1, cur_f2, cur_f3,
-                    v_gain * env, n_gain * env, fric_hz, fric_bw
+                    v_gain * env, n_gain * env, fric_hz, fric_bw,
+                    target_nasal_mix, target_anti_hz
                 ))
 
             if is_voiced:
@@ -502,10 +509,9 @@ class TimeDomainFormantPlanner:
         if not raw_trajectory:
             return []
 
-        # Smooth parameter curves across time to eliminate frame-to-frame steps
         arr = np.array(raw_trajectory, dtype=np.float64)
         smooth_kernel = np.array([0.15, 0.2, 0.3, 0.2, 0.15])
-        for col in range(6):
+        for col in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
             arr[:, col] = np.convolve(arr[:, col], smooth_kernel, mode='same')
 
         return [tuple(row) for row in arr]
@@ -530,77 +536,37 @@ class TimeDomainFormantPlanner:
 
 class TimeDomainGlottalVocoder:
     """
-    Pure-Math Direct Time-Domain Formant & Glottal Synthesizer.
-    Eliminates Griffin-Lim phase ringing by generating continuous Rosenberg
-    glottal pulses and filtering them through resonant biquad vocal-tract filters.
+    5-Formant Time-Domain Vocal Tract Synthesizer with Nasal Anti-Resonances.
+    Combines F1-F3 oral formants, F4-F5 fixed laryngeal resonators, and a
+    time-varying biquad notch filter for realistic nasal consonants.
     """
     def __init__(self, sample_rate=22050, frame_ms=5.0):
         self.sr = sample_rate
         self.samples_per_frame = int(round((frame_ms / 1000.0) * sample_rate))
 
     def _rosenberg_glottal_wave(self, pitch_track):
-        """
-        Generates a continuous, phase-coherent human glottal flow derivative wave
-        using the biomechanical Rosenberg pulse model (smooth opening, sharp closure).
-        """
         n_samples = len(pitch_track)
-        # Integrate instantaneous frequency to maintain 100% continuous phase
         phase = np.cumsum(pitch_track / self.sr) % 1.0
 
-        # Rosenberg glottal pulse parameters: Oq = open quotient (0.62), Sq = speed quotient
-        tp = 0.42  # Peak glottal opening phase
-        tn = 0.62  # Glottal closure phase
+        # Sharper glottal closure (tp=0.42, tn=0.58) generates richer upper harmonics for clarity
+        tp = 0.42
+        tn = 0.58
 
         pulse = np.zeros(n_samples)
         open_mask = phase < tp
         close_mask = (phase >= tp) & (phase < tn)
 
-        # Smooth polynomial glottal opening and closing derivative
         p_open = phase[open_mask] / tp
         pulse[open_mask] = 3.0 * (p_open ** 2) - 2.0 * (p_open ** 3)
 
         p_close = (phase[close_mask] - tp) / (tn - tp)
         pulse[close_mask] = 1.0 - (p_close ** 2)
 
-        # Differentiate glottal volume velocity to model lip radiation (+6dB/oct)
+        # Lip radiation derivative (+6dB/oct lift) without heavy low-pass muffling
         glottal_source = np.diff(pulse, prepend=0.0)
-        # Soft low-pass smoothing to give warm human chest tone
-        glottal_source = np.convolve(glottal_source, np.array([0.25, 0.5, 0.25]), mode='same')
         return glottal_source
 
-    def _apply_time_varying_resonator(self, signal, freq_track, bandwidth_hz, gain=1.0):
-        """
-        Second-order digital resonator (biquad bandpass) with frame-by-frame
-        coefficient updates for smooth, natural vocal-tract formant shaping.
-        """
-        n_samples = len(signal)
-        out = np.zeros(n_samples)
-        step = self.samples_per_frame
-
-        r = np.exp(-np.pi * bandwidth_hz / self.sr)
-        r2 = r * r
-        scale = (1.0 - r2) * 0.5
-
-        y1 = 0.0
-        y2 = 0.0
-
-        for start in range(0, n_samples, step):
-            end = min(start + step, n_samples)
-            f0 = freq_track[start]
-            if f0 <= 50.0:
-                continue
-            a1 = 2.0 * r * np.cos(2.0 * np.pi * f0 / self.sr)
-
-            for i in range(start, end):
-                y0 = scale * signal[i] + a1 * y1 - r2 * y2
-                out[i] = y0
-                y2 = y1
-                y1 = y0
-
-        return out * gain
-
-    def synthesize(self, trajectory, breathiness=0.14):
-        """Renders frame trajectory directly into a natural 22.05kHz audio waveform."""
+    def synthesize(self, trajectory, breathiness=0.12, vocal_tract_scale=1.0):
         if not trajectory:
             return np.zeros(self.sr // 10)
 
@@ -608,37 +574,170 @@ class TimeDomainGlottalVocoder:
         n_frames = len(trajectory)
         n_samples = n_frames * step
 
-        # Expand frame parameters to sample-level arrays
-        pitch_track = np.repeat([f[0] for f in trajectory], step)
-        f1_track = np.repeat([f[1] for f in trajectory], step)
-        f2_track = np.repeat([f[2] for f in trajectory], step)
-        f3_track = np.repeat([f[3] for f in trajectory], step)
-        v_gain_track = np.repeat([f[4] for f in trajectory], step)
-        n_gain_track = np.repeat([f[5] for f in trajectory], step)
-        fric_hz_track = np.repeat([f[6] for f in trajectory], step)
+        frame_x = np.arange(n_frames) * step
+        sample_x = np.arange(n_samples)
 
-        # 1. Generate continuous glottal source + aspiration breathiness
+        arr = np.array(trajectory, dtype=np.float64)
+        pitch_track = np.interp(sample_x, frame_x, arr[:, 0])
+        f1_track = np.interp(sample_x, frame_x, arr[:, 1])
+        f2_track = np.interp(sample_x, frame_x, arr[:, 2])
+        f3_track = np.interp(sample_x, frame_x, arr[:, 3])
+        v_gain_track = np.interp(sample_x, frame_x, arr[:, 4])
+        n_gain_track = np.interp(sample_x, frame_x, arr[:, 5])
+        fric_hz_track = np.interp(sample_x, frame_x, arr[:, 6])
+        nasal_mix_track = np.interp(sample_x, frame_x, arr[:, 8])
+        anti_hz_track = np.interp(sample_x, frame_x, arr[:, 9])
+
+        # 1. Crisp glottal pulse + controlled breath aspiration
         glottal = self._rosenberg_glottal_wave(pitch_track)
         glottal /= (np.max(np.abs(glottal)) + 1e-8)
 
-        white_noise = np.random.normal(0.0, 0.35, n_samples)
-        # Modulate aspiration breathiness with the glottal cycle for realism
+        white_noise = np.random.normal(0.0, 0.28, n_samples)
         aspiration = white_noise * breathiness * (0.4 + 0.6 * np.abs(glottal))
         voiced_excitation = (glottal + aspiration) * v_gain_track
 
-        # 2. Pass voiced source through parallel vocal-tract formant resonators (F1, F2, F3)
-        formant_1 = self._apply_time_varying_resonator(voiced_excitation, f1_track, bandwidth_hz=75.0, gain=1.00)
-        formant_2 = self._apply_time_varying_resonator(voiced_excitation, f2_track, bandwidth_hz=105.0, gain=0.65)
-        formant_3 = self._apply_time_varying_resonator(voiced_excitation, f3_track, bandwidth_hz=150.0, gain=0.35)
-        voiced_speech = formant_1 + formant_2 + formant_3
+        # 2. Clarity-balanced Formants: attenuate muddy low F1 (0.62) & boost crisp F2/F3 (0.95 / 0.65)
+        f1_out = self._apply_smooth_resonator(voiced_excitation, f1_track, bandwidth_hz=65.0, gain=0.62)
+        f2_out = self._apply_smooth_resonator(voiced_excitation + 0.30 * f1_out, f2_track, bandwidth_hz=85.0, gain=0.95)
+        f3_out = self._apply_smooth_resonator(voiced_excitation + 0.25 * f2_out, f3_track, bandwidth_hz=120.0, gain=0.65)
 
-        # 3. Shape unvoiced consonant frication (S, SH, F, TH, T, K bursts)
+        # 3. Laryngeal Formants (F4 ~3350Hz & F5 ~3850Hz) for crisp vocal articulation
+        f4_track = np.full(n_samples, 3350.0 * vocal_tract_scale)
+        f5_track = np.full(n_samples, 3850.0 * vocal_tract_scale)
+        f4_out = self._apply_smooth_resonator(voiced_excitation + 0.20 * f3_out, f4_track, bandwidth_hz=200.0, gain=0.35)
+        f5_out = self._apply_smooth_resonator(voiced_excitation + 0.15 * f4_out, f5_track, bandwidth_hz=250.0, gain=0.20)
+
+        oral_speech = f1_out + f2_out + f3_out + f4_out + f5_out
+
+        # 4. Controlled Nasal Cavity Branch (reduced murmur boominess)
+        nasal_murmur_freq = np.full(n_samples, 265.0 * vocal_tract_scale)
+        nasal_murmur = self._apply_smooth_resonator(voiced_excitation, nasal_murmur_freq, bandwidth_hz=60.0, gain=0.55)
+        notched_oral = self._apply_smooth_notch(oral_speech, anti_hz_track, bandwidth_hz=180.0)
+
+        voiced_speech = (1.0 - nasal_mix_track) * oral_speech + nasal_mix_track * (0.45 * nasal_murmur + 0.65 * notched_oral)
+
+        # 5. Crisp consonant frication (S, SH, T, K, F, TH)
         fric_excitation = white_noise * n_gain_track
-        unvoiced_speech = self._apply_time_varying_resonator(fric_excitation, fric_hz_track, bandwidth_hz=950.0, gain=1.15)
+        unvoiced_speech = self._apply_smooth_resonator(fric_excitation, fric_hz_track, bandwidth_hz=850.0, gain=1.45)
 
         waveform = voiced_speech + unvoiced_speech
-        # Gentle high-frequency warmth filter + normalization
-        waveform = np.convolve(waveform, np.array([0.15, 0.70, 0.15]), mode='same')
+
+        # 6. High-pass mud cut (< 110Hz) + subtle upper-mid presence boost (~2.5kHz)
+        spectrum = np.fft.rfft(waveform)
+        freqs = np.fft.rfftfreq(len(waveform), d=1.0 / self.sr)
+        eq_curve = np.ones_like(freqs)
+        # Cut sub-120Hz rumble/muddiness
+        eq_curve[freqs < 120.0] = (freqs[freqs < 120.0] / 120.0) ** 2
+        # Gentle +3.5dB vocal clarity boost centered at 2400Hz
+        eq_curve += 0.45 * np.exp(-0.5 * ((freqs - 2400.0) / 900.0) ** 2)
+        waveform = np.fft.irfft(spectrum * eq_curve, n=len(waveform))
+
+        peak = np.max(np.abs(waveform))
+        if peak > 1e-8:
+            waveform = (waveform / peak) * 0.94
+        return waveform
+
+    def _apply_smooth_resonator(self, signal, freq_track, bandwidth_hz, gain=1.0):
+        """Sample-accurate time-varying biquad bandpass filter (pole pair)."""
+        n_samples = len(signal)
+        out = np.zeros(n_samples)
+
+        r = np.exp(-np.pi * bandwidth_hz / self.sr)
+        r2 = r * r
+        scale = (1.0 - r2) * 0.5
+        a1_track = 2.0 * r * np.cos(2.0 * np.pi * np.clip(freq_track, 60.0, self.sr * 0.45) / self.sr)
+
+        y1 = 0.0
+        y2 = 0.0
+        for i in range(n_samples):
+            y0 = scale * signal[i] + a1_track[i] * y1 - r2 * y2
+            out[i] = y0
+            y2 = y1
+            y1 = y0
+
+        return out * gain
+
+    def _apply_smooth_notch(self, signal, zero_freq_track, bandwidth_hz=180.0):
+        """
+        Sample-accurate time-varying biquad anti-resonance (zero pair).
+        Carves out spectral valleys created by the oral cavity side-branch during nasals.
+        """
+        n_samples = len(signal)
+        out = np.zeros(n_samples)
+
+        r = np.exp(-np.pi * bandwidth_hz / self.sr)
+        r2 = r * r
+        b1_track = -2.0 * r * np.cos(2.0 * np.pi * np.clip(zero_freq_track, 200.0, self.sr * 0.45) / self.sr)
+
+        x1 = 0.0
+        x2 = 0.0
+        for i in range(n_samples):
+            x0 = signal[i]
+            out[i] = x0 + b1_track[i] * x1 + r2 * x2
+            x2 = x1
+            x1 = x0
+
+        return out
+
+    def synthesize(self, trajectory, breathiness=0.14, vocal_tract_scale=1.0):
+        if not trajectory:
+            return np.zeros(self.sr // 10)
+
+        step = self.samples_per_frame
+        n_frames = len(trajectory)
+        n_samples = n_frames * step
+
+        frame_x = np.arange(n_frames) * step
+        sample_x = np.arange(n_samples)
+
+        arr = np.array(trajectory, dtype=np.float64)
+        pitch_track = np.interp(sample_x, frame_x, arr[:, 0])
+        f1_track = np.interp(sample_x, frame_x, arr[:, 1])
+        f2_track = np.interp(sample_x, frame_x, arr[:, 2])
+        f3_track = np.interp(sample_x, frame_x, arr[:, 3])
+        v_gain_track = np.interp(sample_x, frame_x, arr[:, 4])
+        n_gain_track = np.interp(sample_x, frame_x, arr[:, 5])
+        fric_hz_track = np.interp(sample_x, frame_x, arr[:, 6])
+        nasal_mix_track = np.interp(sample_x, frame_x, arr[:, 8])
+        anti_hz_track = np.interp(sample_x, frame_x, arr[:, 9])
+
+        # 1. Continuous glottal pulse + soft breath aspiration
+        glottal = self._rosenberg_glottal_wave(pitch_track)
+        glottal /= (np.max(np.abs(glottal)) + 1e-8)
+
+        white_noise = np.random.normal(0.0, 0.30, n_samples)
+        aspiration = white_noise * breathiness * (0.4 + 0.6 * np.abs(glottal))
+        voiced_excitation = (glottal + aspiration) * v_gain_track
+
+        # 2. Primary oral formants (F1, F2, F3)
+        f1_out = self._apply_smooth_resonator(voiced_excitation, f1_track, bandwidth_hz=85.0, gain=1.0)
+        f2_out = self._apply_smooth_resonator(voiced_excitation + 0.35 * f1_out, f2_track, bandwidth_hz=115.0, gain=0.70)
+        f3_out = self._apply_smooth_resonator(voiced_excitation + 0.25 * f2_out, f3_track, bandwidth_hz=160.0, gain=0.42)
+
+        # 3. Fixed Laryngeal Formants (F4 ~3350Hz & F5 ~3850Hz) for human vocal ring & brilliance
+        f4_track = np.full(n_samples, 3350.0 * vocal_tract_scale)
+        f5_track = np.full(n_samples, 3850.0 * vocal_tract_scale)
+        f4_out = self._apply_smooth_resonator(voiced_excitation + 0.20 * f3_out, f4_track, bandwidth_hz=240.0, gain=0.22)
+        f5_out = self._apply_smooth_resonator(voiced_excitation + 0.15 * f4_out, f5_track, bandwidth_hz=300.0, gain=0.12)
+
+        oral_speech = f1_out + f2_out + f3_out + f4_out + f5_out
+
+        # 4. Nasal Cavity Branch: low-frequency nasal murmur (~265Hz) + oral anti-resonance notch
+        nasal_murmur_freq = np.full(n_samples, 265.0 * vocal_tract_scale)
+        nasal_murmur = self._apply_smooth_resonator(voiced_excitation, nasal_murmur_freq, bandwidth_hz=65.0, gain=0.95)
+        notched_oral = self._apply_smooth_notch(oral_speech, anti_hz_track, bandwidth_hz=200.0)
+
+        # Blend smoothly between pure oral speech and nasal-coupled speech
+        voiced_speech = (1.0 - nasal_mix_track) * oral_speech + nasal_mix_track * (0.65 * nasal_murmur + 0.55 * notched_oral)
+
+        # 5. Unvoiced consonant frication
+        fric_excitation = white_noise * n_gain_track
+        unvoiced_speech = self._apply_smooth_resonator(fric_excitation, fric_hz_track, bandwidth_hz=1100.0, gain=1.10)
+
+        waveform = voiced_speech + unvoiced_speech
+        waveform = np.tanh(waveform * 1.2)
+        waveform = np.convolve(waveform, np.array([0.15, 0.2, 0.3, 0.2, 0.15]), mode='same')
+
         peak = np.max(np.abs(waveform))
         if peak > 1e-8:
             waveform = (waveform / peak) * 0.92
@@ -747,7 +846,11 @@ class TalosTTS:
     def _synthesize(self, text, active_profile):
         phonemes, _ = self.g2p.encode(text)
         trajectory = self.acoustic.forward(phonemes, profile_override=active_profile)
-        raw_waveform = self.vocoder.synthesize(trajectory, breathiness=active_profile.breathiness)
+        raw_waveform = self.vocoder.synthesize(
+            trajectory,
+            breathiness=active_profile.breathiness,
+            vocal_tract_scale=active_profile.vocal_tract_scale
+        )
         return self.dsp.process(raw_waveform, active_profile)
     
     def _queue_worker(self):
