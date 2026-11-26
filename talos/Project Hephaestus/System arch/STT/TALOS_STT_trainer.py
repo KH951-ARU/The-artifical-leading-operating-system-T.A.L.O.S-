@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 # Import your pure-NumPy frontend from Component 1
-from talos_stt_frontend import TalosAudioFrontend
+from TALOS_STT_frontend import TalosAudioFrontend
 
 
 # =====================================================================
