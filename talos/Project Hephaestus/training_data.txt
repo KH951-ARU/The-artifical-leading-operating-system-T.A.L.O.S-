@@ -1,0 +1,5 @@
+User: Hello Talos
+Talos: Systems online. How may I assist you?
+
+User: Run diagnostics
+Talos: Running local check. Neural engine, memory search, and action parser are online.

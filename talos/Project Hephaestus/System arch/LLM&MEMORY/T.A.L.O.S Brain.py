@@ -3,8 +3,6 @@ import json
 import os
 import re
 import subprocess
-from collections import Counter
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,85 +10,64 @@ import torch.nn.functional as F
 
 
 # ==========================================
-# 1. FROM-SCRATCH BYTE-PAIR ENCODING (BPE)
+# 1. CLEAN WORD & SYMBOL TOKENIZER
 # ==========================================
 class TalosWordTokenizer:
-    def __init__(self, num_merges=180):
-        self.num_merges = num_merges
-        self.merges = {}
-        self.vocab = {}
+    def __init__(self):
+        self.special_tokens = ["<PAD>", "<UNK>", "<END>", "\n"]
+        self.stoi = {}
+        self.itos = {}
 
-    def _get_stats(self, ids):
-        counts = Counter()
-        for pair in zip(ids, ids[1:]):
-            counts[pair] += 1
-        return counts
-
-    def _merge(self, ids, pair, idx):
-        merged = []
-        i = 0
-        while i < len(ids):
-            if i < len(ids) - 1 and ids[i] == pair[0] and ids[i + 1] == pair[1]:
-                merged.append(idx)
-                i += 2
-            else:
-                merged.append(ids[i])
-                i += 1
-        return merged
+    def _tokenize_text(self, text):
+        return re.findall(r"\[ACTION:[^\]]+\]|<END>|\n|[a-zA-Z0-9_']+|[^\s\w]", text)
 
     def train(self, text):
-        ids = list(text.encode("utf-8"))
-        self.vocab = {i: bytes([i]) for i in range(256)}
-        self.merges = {}
-
-        for i in range(self.num_merges):
-            stats = self._get_stats(ids)
-            if not stats:
-                break
-            top_pair = max(stats, key=stats.get)
-            new_id = 256 + i
-            ids = self._merge(ids, top_pair, new_id)
-            self.merges[top_pair] = new_id
-            self.vocab[new_id] = self.vocab[top_pair[0]] + self.vocab[top_pair[1]]
+        tokens = self._tokenize_text(text)
+        unique_tokens = sorted(list(set(tokens) - set(self.special_tokens)))
+        all_vocab = self.special_tokens + unique_tokens
+        self.stoi = {tok: i for i, tok in enumerate(all_vocab)}
+        self.itos = {i: tok for i, tok in enumerate(all_vocab)}
 
     def encode(self, text):
-        ids = list(text.encode("utf-8"))
-        while len(ids) >= 2:
-            stats = self._get_stats(ids)
-            if not stats:
-                break
-            pair = min(stats, key=lambda p: self.merges.get(p, float("inf")))
-            if pair not in self.merges:
-                break
-            ids = self._merge(ids, pair, self.merges[pair])
-        return ids
+        tokens = self._tokenize_text(text)
+        unk_id = self.stoi["<UNK>"]
+        return [self.stoi.get(t, unk_id) for t in tokens]
 
     def decode(self, ids):
-        byte_stream = b"".join(self.vocab[i] for i in ids if i in self.vocab)
-        return byte_stream.decode("utf-8", errors="replace")
+        pad_id = self.stoi["<PAD>"]
+        end_id = self.stoi["<END>"]
+        words = [self.itos.get(i, "") for i in ids if i not in (pad_id, end_id)]
+        text = ""
+        for w in words:
+            if w == "\n":
+                text += "\n"
+            elif text == "" or text.endswith("\n"):
+                text += w
+            elif re.match(r"^[.,!?;:)\]]$", w):
+                text += w
+            else:
+                text += " " + w
+        return text.strip()
 
     @property
     def vocab_size(self):
-        return len(self.vocab)
+        return len(self.stoi)
 
     def state_dict(self):
-        return {
-            "num_merges": self.num_merges,
-            "merges": {f"{k[0]},{k[1]}": v for k, v in self.merges.items()},
-            "vocab": self.vocab,
-        }
+        return {"stoi": self.stoi, "itos": self.itos}
 
     def load_state_dict(self, state):
-        self.num_merges = state["num_merges"]
-        self.merges = {tuple(map(int, k.split(","))): v for k, v in state["merges"].items()}
-        self.vocab = state["vocab"]
+        self.stoi = state["stoi"]
+        self.itos = {int(k): v for k, v in state["itos"].items()}
 
 
 # ==========================================
-# 2. MINI-GPT TRANSFORMER ARCHITECTURE
+# 2. DECODER-ONLY TRANSFORMER
 # ==========================================
 class MiniTalosLLM(nn.Module):
-    def __init__(self, vocab_size, embed_dim=128, num_heads=4, num_layers=3, max_len=160):
+    def __init__(
+        self, vocab_size, embed_dim=128, num_heads=4, num_layers=3, max_len=128
+    ):
         super().__init__()
         self.config = {
             "vocab_size": vocab_size,
@@ -107,40 +84,33 @@ class MiniTalosLLM(nn.Module):
             d_model=embed_dim,
             nhead=num_heads,
             dim_feedforward=embed_dim * 4,
-            dropout=0.1,
+            dropout=0.0,
             batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.lm_head = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx):
         B, T = idx.shape
         positions = torch.arange(0, T, device=idx.device).unsqueeze(0)
         x = self.token_embedding(idx) + self.position_embedding(positions)
 
-        causal_mask = nn.Transformer.generate_square_subsequent_mask(T).to(idx.device)
-        x = self.transformer(x, mask=causal_mask, is_causal=True)
-        logits = self.lm_head(x)
-
-        loss = None
-        if targets is not None:
-            B, T, C = logits.shape
-            loss = F.cross_entropy(logits.view(B * T, C), targets.view(B * T))
-        return logits, loss
+        causal_mask = torch.triu(
+            torch.full((T, T), float("-inf"), device=idx.device), diagonal=1
+        )
+        x = self.transformer(x, mask=causal_mask)
+        return self.lm_head(x)
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens=50, greedy=True, temperature=0.3):
+    def generate(self, idx, end_id, max_new_tokens=40):
         self.eval()
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.max_len:]
-            logits, _ = self(idx_cond)
-            last_logits = logits[:, -1, :]
-            if greedy:
-                next_token = torch.argmax(last_logits, dim=-1, keepdim=True)
-            else:
-                probs = F.softmax(last_logits / temperature, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
+            idx_cond = idx[:, -self.max_len :]
+            logits = self(idx_cond)
+            next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
             idx = torch.cat((idx, next_token), dim=1)
+            if next_token.item() == end_id:
+                break
         return idx
 
 
@@ -180,8 +150,8 @@ class TalosMemory:
             return []
 
         all_words = set(re.findall(r"\w+", query.lower()))
-        for memory in self.memories:
-            all_words.update(re.findall(r"\w+", memory.lower()))
+        for m in self.memories:
+            all_words.update(re.findall(r"\w+", m.lower()))
         vocab = {w: i for i, w in enumerate(all_words)}
 
         q_vec = self._vectorize(query, vocab)
@@ -190,15 +160,15 @@ class TalosMemory:
             return []
 
         scored = []
-        for memory in self.memories:
-            m_vec = self._vectorize(memory, vocab)
+        for m in self.memories:
+            m_vec = self._vectorize(m, vocab)
             m_norm = np.linalg.norm(m_vec)
             if m_norm > 0:
                 sim = np.dot(q_vec, m_vec) / (q_norm * m_norm)
-                scored.append((sim, memory))
+                scored.append((sim, m))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [memory for sim, memory in scored[:top_k] if sim > 0.15]
+        return [m for sim, m in scored[:top_k] if sim > 0.15]
 
 
 # ==========================================
@@ -261,7 +231,7 @@ class TalosActionEngine:
 
 
 # ==========================================
-# 5. CHECKPOINTS & TRAINING SYSTEM
+# 5. .PT CHECKPOINTS & TRAINING SYSTEM
 # ==========================================
 def save_checkpoint(filepath, model, optimizer, tokenizer, dataset_list):
     torch.save(
@@ -278,11 +248,11 @@ def save_checkpoint(filepath, model, optimizer, tokenizer, dataset_list):
 
 def load_checkpoint(filepath, device):
     ckpt = torch.load(filepath, map_location=device, weights_only=False)
-    tokenizer = ScratchBPETokenizer()
+    tokenizer = TalosWordTokenizer()
     tokenizer.load_state_dict(ckpt["tokenizer_state"])
     model = MiniTalosLLM(**ckpt["model_config"]).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
-    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3)
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     return model, optimizer, tokenizer, ckpt["dataset"]
 
@@ -292,14 +262,8 @@ def load_training_file(filepath="training_data.txt"):
         default_data = (
             "User: Hello Talos\n"
             "Talos: Systems online. How may I assist you?\n\n"
-            "User: Turn on the lights\n"
-            "Talos: [ACTION: lights_on()] Turning on the lights.\n\n"
-            "User: Turn off the lights\n"
-            "Talos: [ACTION: lights_off()] Turning off the lights.\n\n"
-            "User: What time is it\n"
-            "Talos: [ACTION: get_time()] Checking the system clock.\n\n"
-            "User: Open calculator\n"
-            'Talos: [ACTION: run_app("calculator")] Opening calculator.\n'
+            "User: Run diagnostics\n"
+            "Talos: Running local check. Neural engine, memory search, and action parser are online.\n"
         )
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(default_data)
@@ -320,26 +284,61 @@ def append_to_training_file(new_pair, filepath="training_data.txt"):
         f.write(f"\n{new_pair.strip()}\n")
 
 
-def train_on_corpus(model, optimizer, tokenizer, dataset_list, steps=1000, device="cpu", log_interval=200):
-    formatted_pairs = [pair.strip() + "\n\n" for pair in dataset_list]
-    full_text = "".join(formatted_pairs) * 20
-    data_ids = torch.tensor(tokenizer.encode(full_text), dtype=torch.long)
-    if len(data_ids) < 8:
+def normalize_pair(pair_text):
+    lines = pair_text.strip().split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("User:"):
+            lines[i] = "User: " + line[5:].strip().lower()
+    return "\n".join(lines) + "\n<END>"
+
+
+def train_on_corpus(
+    model,
+    optimizer,
+    tokenizer,
+    dataset_list,
+    steps=500,
+    device="cpu",
+    log_interval=100,
+):
+    encoded_pairs = []
+    for pair in dataset_list:
+        ids = tokenizer.encode(normalize_pair(pair))
+        if len(ids) > 2:
+            encoded_pairs.append(ids)
+
+    if not encoded_pairs:
         return
 
-    block_size = min(64, len(data_ids) - 2)
-    if block_size < 4:
-        return
+    max_pair_len = min(model.max_len, max(len(pair) for pair in encoded_pairs))
+    pad_id = tokenizer.stoi["<PAD>"]
+    batch_x = []
+    batch_y = []
 
+    for ids in encoded_pairs:
+        seq = ids[:max_pair_len]
+        padded = seq + [pad_id] * (max_pair_len - len(seq))
+        batch_x.append(padded[:-1])
+        batch_y.append(padded[1:])
+
+    x_all = torch.tensor(batch_x, dtype=torch.long, device=device)
+    y_all = torch.tensor(batch_y, dtype=torch.long, device=device)
     model.train()
+    num_samples = x_all.size(0)
+    batch_size = min(32, num_samples)
+
     for step in range(1, steps + 1):
-        ix = torch.randint(len(data_ids) - block_size, (16,))
-        x = torch.stack([data_ids[i : i + block_size] for i in ix]).to(device)
-        y = torch.stack([data_ids[i + 1 : i + block_size + 1] for i in ix]).to(device)
-        _, loss = model(x, y)
+        indices = torch.randint(0, num_samples, (batch_size,), device=device)
+        logits = model(x_all[indices])
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            y_all[indices].view(-1),
+            ignore_index=pad_id,
+        )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
         if log_interval and step % log_interval == 0:
             print(f"[TRAIN] Step {step}/{steps} | Loss: {loss.item():.4f}")
 
@@ -347,41 +346,70 @@ def train_on_corpus(model, optimizer, tokenizer, dataset_list, steps=1000, devic
 # ==========================================
 # 6. MAIN INTERACTIVE ASSISTANT LOOP
 # ==========================================
+
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ckpt_path = "talos_checkpoint.pt"
+    checkpoint_path = "talos_checkpoint.pt"
     data_path = "training_data.txt"
     memory = TalosMemory()
     actions = TalosActionEngine()
 
-    if os.path.exists(ckpt_path):
+    if os.path.exists(checkpoint_path):
         print("[SYSTEM] Loading Talos checkpoint...")
-        model, optimizer, tokenizer, dataset = load_checkpoint(ckpt_path, device)
+        model, optimizer, tokenizer, dataset = load_checkpoint(
+            checkpoint_path,
+            device,
+        )
     else:
         print(f"[SYSTEM] Initializing from {data_path}...")
         dataset = load_training_file(data_path)
         tokenizer = TalosWordTokenizer()
-        tokenizer.train("\n".join(normalize_pair(p) for p in dataset))
+        tokenizer.train("\n".join(normalize_pair(pair) for pair in dataset))
         model = MiniTalosLLM(vocab_size=tokenizer.vocab_size).to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=2e-3)
-        print(f"[SYSTEM] Training on {len(dataset)} pairs (Vocab size: {tokenizer.vocab_size})...")
-        train_on_corpus(model, optimizer, tokenizer, dataset, steps=1000, device=device, log_interval=200)
-        save_checkpoint(ckpt_path, model, optimizer, tokenizer, dataset)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3)
+        print(
+            f"[SYSTEM] Training on {len(dataset)} pairs "
+            f"(Vocab size: {tokenizer.vocab_size})..."
+        )
+        train_on_corpus(
+            model,
+            optimizer,
+            tokenizer,
+            dataset,
+            steps=500,
+            device=device,
+            log_interval=100,
+        )
+        save_checkpoint(
+            checkpoint_path,
+            model,
+            optimizer,
+            tokenizer,
+            dataset,
+        )
 
     print("\n=== TALOS V2 PYTHON CORE ONLINE ===")
-    print("Commands:")
-    print("  /fix   -> Teach Talos a new reply or [ACTION: ...]")
-    print("  /remember -> Save a fact to long-term NumPy memory")
-    print("  /quit -> Save checkpoint and exit\n")
-
+    print("Commands: '/fix ', '/remember ', '/clear', '/quit'\n")
     last_prompt_context = ""
+    end_id = tokenizer.stoi["<END>"]
+
     while True:
         user_input = input("You: ").strip()
         if not user_input:
             continue
 
+        if user_input.lower() in ["/clear", "clear"]:
+            os.system("cls" if os.name == "nt" else "clear")
+            continue
+
         if user_input.lower() == "/quit":
-            save_checkpoint(ckpt_path, model, optimizer, tokenizer, dataset)
+            save_checkpoint(
+                checkpoint_path,
+                model,
+                optimizer,
+                tokenizer,
+                dataset,
+            )
             print("[SYSTEM] Checkpoint saved. Shutting down.")
             break
 
@@ -402,47 +430,62 @@ if __name__ == "__main__":
             new_pair = f"{last_prompt_context}\nTalos: {corrected}\n"
             dataset.append(new_pair)
             append_to_training_file(new_pair, data_path)
+            tokenizer.train("\n".join(normalize_pair(pair) for pair in dataset))
 
-            tokenizer.train("\n".join(normalize_pair(p)for p in dataset))
             if tokenizer.vocab_size != model.config["vocab_size"]:
                 model = MiniTalosLLM(vocab_size=tokenizer.vocab_size).to(device)
                 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3)
-                end_id = tokenizer.stoi[""]
 
-
-
+            end_id = tokenizer.stoi["<END>"]
             print("[SYSTEM] Synced to training_data.txt. Fine-tuning...")
-            train_on_corpus(model, optimizer, tokenizer, dataset, steps=400, device=device, log_interval=200)
-            save_checkpoint(ckpt_path, model, optimizer, tokenizer, dataset)
-            _, action_res = actions.parse_and_execute(corrected)
-            if action_res:
-                print(f"[ACTION EXECUTED] {action_res}")
+            train_on_corpus(
+                model,
+                optimizer,
+                tokenizer,
+                dataset,
+                steps=400,
+                device=device,
+                log_interval=200,
+            )
+            save_checkpoint(
+                checkpoint_path,
+                model,
+                optimizer,
+                tokenizer,
+                dataset,
+            )
+
+            _, action_result = actions.parse_and_execute(corrected)
+            if action_result:
+                print(f"[ACTION EXECUTED] {action_result}")
             print(f"[SYSTEM] Learned: '{corrected}'\n")
             continue
 
-        recalled = memory.search(user_input, top_k=2)
+        clean_query = user_input.lower()
+        recalled = memory.search(clean_query, top_k=2)
+
         if recalled:
-            mem_block = "Memory: " + " | ".join(recalled) + "\n"
+            memory_block = "Memory: " + " | ".join(recalled) + "\n"
             print(f"[MEMORY RECALLED] {recalled}")
-            last_prompt_context = f"{mem_block}User: {user_input}"
+            last_prompt_context = f"{memory_block}User: {clean_query}"
         else:
-            last_prompt_context = f"User: {user_input}"
+            last_prompt_context = f"User: {clean_query}"
 
         full_prompt = f"{last_prompt_context}\nTalos:"
-        input_ids = torch.tensor([tokenizer.encode(full_prompt)], dtype=torch.long).to(device)
-        output_ids = model.generate(input_ids, end_id=end_id, max_new_tokens=40)
-
+        input_ids = torch.tensor(
+            [tokenizer.encode(full_prompt)],
+            dtype=torch.long,
+        ).to(device)
+        output_ids = model.generate(
+            input_ids,
+            end_id=end_id,
+            max_new_tokens=40,
+        )
         prompt_length = input_ids.size(1)
         new_tokens = output_ids[0, prompt_length:].tolist()
         raw_reply = tokenizer.decode(new_tokens).strip()
-
-        for stop_token in ["\nUser:", "\nMemory:"]:
-            raw_reply = raw_reply.split(stop_token, 1)[0]
-        raw_reply = raw_reply.strip()
-
         spoken_reply, action_result = actions.parse_and_execute(raw_reply)
+
         if action_result:
             print(f"[ACTION EXECUTED] {action_result}")
-            print(f"Talos: {spoken_reply}\n")
-        else:
-            print(f"Talos: {raw_reply}\n")
+        print(f"Talos: {spoken_reply}\n")
