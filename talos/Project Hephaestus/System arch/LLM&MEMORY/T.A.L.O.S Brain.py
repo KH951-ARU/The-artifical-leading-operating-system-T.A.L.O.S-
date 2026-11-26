@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+torch.set_num_threads(os.cpu_count() or 4)
+torch.set_float32_matmul_precision("high")
 
 # ==========================================
 # 1. CLEAN WORD & SYMBOL TOKENIZER
@@ -90,7 +92,7 @@ class MiniTalosLLM(nn.Module):
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.lm_head = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, idx):
+    def forward(self, idx, pad_idx=0):
         B, T = idx.shape
         positions = torch.arange(0, T, device=idx.device).unsqueeze(0)
         x = self.token_embedding(idx) + self.position_embedding(positions)
@@ -98,7 +100,8 @@ class MiniTalosLLM(nn.Module):
         causal_mask = torch.triu(
             torch.full((T, T), float("-inf"), device=idx.device), diagonal=1
         )
-        x = self.transformer(x, mask=causal_mask)
+        pad_mask = torch.zeros_like(idx, dtype=torch.float).masked_fill(idx == pad_idx, float("-inf"))
+        x = self.transformer(x, mask=causal_mask, src_key_padding_mask=pad_mask)
         return self.lm_head(x)
 
     @torch.no_grad()
@@ -297,9 +300,9 @@ def train_on_corpus(
     optimizer,
     tokenizer,
     dataset_list,
-    steps=500,
+    steps=600,
     device="cpu",
-    log_interval=100,
+    log_interval=150,
 ):
     encoded_pairs = []
     for pair in dataset_list:
@@ -310,11 +313,10 @@ def train_on_corpus(
     if not encoded_pairs:
         return
 
-    max_pair_len = min(model.max_len, max(len(pair) for pair in encoded_pairs))
+    max_pair_len = min(model.max_len, max(len(p) for p in encoded_pairs))
     pad_id = tokenizer.stoi["<PAD>"]
-    batch_x = []
-    batch_y = []
-
+    
+    batch_x, batch_y = [], []
     for ids in encoded_pairs:
         seq = ids[:max_pair_len]
         padded = seq + [pad_id] * (max_pair_len - len(seq))
@@ -323,19 +325,28 @@ def train_on_corpus(
 
     x_all = torch.tensor(batch_x, dtype=torch.long, device=device)
     y_all = torch.tensor(batch_y, dtype=torch.long, device=device)
+    
     model.train()
     num_samples = x_all.size(0)
-    batch_size = min(32, num_samples)
-
+    batch_size = min(128, num_samples)
     for step in range(1, steps + 1):
-        indices = torch.randint(0, num_samples, (batch_size,), device=device)
-        logits = model(x_all[indices])
+        ix = torch.randint(0, num_samples, (batch_size,), device=device)
+        x_batch = x_all[ix]
+        y_batch = y_all[ix]
+
+        # Find the longest real sequence in THIS batch and trim excess <PAD> tokens
+        non_pad_lengths = (x_batch != pad_id).sum(dim=1)
+        max_b_len = max(2, int(non_pad_lengths.max().item()))
+        x_batch = x_batch[:, :max_b_len]
+        y_batch = y_batch[:, :max_b_len]
+
+        logits = model(x_batch, pad_idx=pad_id)
         loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)),
-            y_all[indices].view(-1),
-            ignore_index=pad_id,
+            logits.reshape(-1, logits.size(-1)),
+            y_batch.reshape(-1),
+            ignore_index=pad_id
         )
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
 
@@ -349,8 +360,9 @@ def train_on_corpus(
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    checkpoint_path = "talos_checkpoint.pt"
-    data_path = "training_data.txt"
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    checkpoint_path = os.path.join(base_dir, "talos_checkpoint.pt")
+    data_path = os.path.join(base_dir, "training_data.txt")
     memory = TalosMemory()
     actions = TalosActionEngine()
 
@@ -425,6 +437,24 @@ if __name__ == "__main__":
             if not last_prompt_context:
                 print("[SYSTEM] Send a message first before using /fix.\n")
                 continue
+            corrected = user_input[5:].strip()
+            new_pair = f"{last_prompt_context}\nTalos: {corrected}\n"
+            dataset.append(new_pair)
+            append_to_training_file(new_pair, data_path)
+
+            tokenizer.train("\n".join(normalize_pair(p) for p in dataset))
+            if tokenizer.vocab_size != model.config["vocab_size"]:
+                model = MiniTalosLLM(vocab_size=tokenizer.vocab_size).to(device)
+                optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3)
+                end_id = tokenizer.stoi["<END>"]
+                # Full retrain only if a brand-new word expanded the vocabulary
+                train_on_corpus(model, optimizer, tokenizer, dataset, steps=600, device=device, log_interval=200)
+            else:
+                # Fast targeted fine-tune on the new pair + small replay sample
+                replay_sample = dataset[-64:] + ([new_pair] * 16)
+                train_on_corpus(model, optimizer, tokenizer, replay_sample, steps=80, device=device, log_interval=40)
+
+            save_checkpoint(ckpt_path, model, optimizer, tokenizer, dataset)
 
             corrected = user_input[5:].strip()
             new_pair = f"{last_prompt_context}\nTalos: {corrected}\n"
