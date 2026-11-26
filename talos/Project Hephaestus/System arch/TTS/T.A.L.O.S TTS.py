@@ -4,6 +4,7 @@ import re
 import wave
 import queue
 import threading
+import urllib.request
 import numpy as np
 
 try:
@@ -34,13 +35,16 @@ except ImportError:
 class VoiceProfile:
     def __init__(
         self,
-        name="T.A.L.O.S. Standard",
-        base_pitch_hz=105.0,
+        name="T.A.L.O.S. Natural Human",
+        base_pitch_hz=108.0,
         speech_rate=1.0,
-        pitch_variance=0.14,
+        pitch_variance=0.18,
         word_pause_scale=1.0,
         vocal_tract_scale=1.0,
-        ring_mod_hz=0.0,
+        breathiness=0.14,  # Subtle vocal cord air turbulence (0.05 to 0.30)
+        pitch_jitter=0.012,  # Natural human vocal cord micro-variation
+        room_ambience=0.18,  # Subtle acoustic room warmth (replaces robotic chorus)
+        ring_mod_hz=0.0,  # Kept at 0.0 for natural human voice
         ring_mod_mix=0.0,
         chorus_mix=0.0,
         bandpass_comms=False,
@@ -51,6 +55,9 @@ class VoiceProfile:
         self.pitch_variance = pitch_variance
         self.word_pause_scale = max(0.1, word_pause_scale)
         self.vocal_tract_scale = vocal_tract_scale
+        self.breathiness = np.clip(breathiness, 0.0, 0.5)
+        self.pitch_jitter = np.clip(pitch_jitter, 0.0, 0.05)
+        self.room_ambience = np.clip(room_ambience, 0.0, 0.5)
         self.ring_mod_hz = ring_mod_hz
         self.ring_mod_mix = np.clip(ring_mod_mix, 0.0, 1.0)
         self.chorus_mix = np.clip(chorus_mix, 0.0, 1.0)
@@ -60,134 +67,138 @@ class VoiceProfile:
     def presets(cls):
         return {
             "command": cls(
-                name="T.A.L.O.S. Command (Authoritative)",
-                base_pitch_hz=92.0,
-                speech_rate=0.92,
-                pitch_variance=0.12,
-                word_pause_scale=1.25,
-                vocal_tract_scale=0.94,
-                ring_mod_hz=35.0,
-                ring_mod_mix=0.15,
-                chorus_mix=0.25,
-                bandpass_comms=False,
+                name="T.A.L.O.S. Natural Baritone (Human)",
+                base_pitch_hz=104.0,
+                speech_rate=0.98,
+                pitch_variance=0.20,
+                word_pause_scale=1.05,
+                vocal_tract_scale=0.97,
+                breathiness=0.14,
+                pitch_jitter=0.012,
+                room_ambience=0.18,
             ),
             "tactical": cls(
-                name="T.A.L.O.S. Tactical (Fast & Crisp)",
-                base_pitch_hz=112.0,
-                speech_rate=1.25,
-                pitch_variance=0.08,
-                word_pause_scale=0.75,
-                vocal_tract_scale=1.0,
-                ring_mod_hz=0.0,
-                ring_mod_mix=0.0,
-                chorus_mix=0.15,
-                bandpass_comms=False,
+                name="T.A.L.O.S. Clear Tenor (Conversational)",
+                base_pitch_hz=124.0,
+                speech_rate=1.08,
+                pitch_variance=0.22,
+                word_pause_scale=0.90,
+                vocal_tract_scale=1.02,
+                breathiness=0.16,
+                pitch_jitter=0.014,
+                room_ambience=0.15,
             ),
-            "mainframe": cls(
-                name="T.A.L.O.S. Classic Mainframe (Monotone)",
-                base_pitch_hz=85.0,
-                speech_rate=0.88,
-                pitch_variance=0.0,
-                word_pause_scale=1.4,
-                vocal_tract_scale=0.90,
-                ring_mod_hz=45.0,
-                ring_mod_mix=0.35,
-                chorus_mix=0.40,
-                bandpass_comms=False,
+            "warm_alto": cls(
+                name="T.A.L.O.S. Warm Alto (Natural Female Register)",
+                base_pitch_hz=188.0,
+                speech_rate=1.02,
+                pitch_variance=0.24,
+                word_pause_scale=0.95,
+                vocal_tract_scale=1.14,
+                breathiness=0.18,
+                pitch_jitter=0.014,
+                room_ambience=0.18,
             ),
         }
 
 
 class TextToPhonemeEncoder:
-    def __init__(self, cmudict_path=None):
-        self.vocab = [
-            "<PAD>",
-            "<UNK>",
-            " ",
-            ",",
-            ".",
+    def __init__(self, cmudict_path=None, auto_download=True):
+        # Include stressed & unstressed phoneme variants in vocabulary
+        base_vowels = [
             "AA",
             "AE",
             "AH",
             "AO",
             "AW",
             "AY",
+            "EH",
+            "ER",
+            "EY",
+            "IH",
+            "IY",
+            "OW",
+            "OY",
+            "UH",
+            "UW",
+        ]
+        stressed_vowels = [f"{v}{s}" for v in base_vowels for s in ("0", "1", "2")]
+        consonants = [
             "B",
             "CH",
             "D",
             "DH",
-            "EH",
-            "ER",
-            "EY",
             "F",
             "G",
             "HH",
-            "IH",
-            "IY",
             "JH",
             "K",
             "L",
             "M",
             "N",
             "NG",
-            "OW",
-            "OY",
             "P",
             "R",
             "S",
             "SH",
             "T",
             "TH",
-            "UH",
-            "UW",
             "V",
             "W",
             "Y",
             "Z",
             "ZH",
         ]
-        self.phoneme_to_id = {phone: index for index, phone in enumerate(self.vocab)}
+        self.vocab = (
+            ["<PAD>", "<UNK>", " ", ",", "."]
+            + base_vowels
+            + stressed_vowels
+            + consonants
+        )
+        self.phoneme_to_id = {p: i for i, p in enumerate(self.vocab)}
+
+        # Custom sci-fi overrides with primary stress (1) marked
         self.lexicon = {
-            "hello": ["HH", "AH", "L", "OW"],
-            "world": ["W", "ER", "L", "D"],
-            "system": ["S", "IH", "S", "T", "AH", "M"],
-            "active": ["AE", "K", "T", "IH", "V"],
-            "talos": ["T", "EY", "L", "AA", "S"],
-            "online": ["AA", "N", "L", "AY", "N"],
-            "project": ["P", "R", "AA", "JH", "EH", "K", "T"],
-            "hephaestus": ["HH", "AH", "F", "EH", "S", "T", "AH", "S"],
-            "all": ["AO", "L"],
-            "systems": ["S", "IH", "S", "T", "AH", "M", "Z"],
-            "operational": ["AA", "P", "ER", "EY", "SH", "AH", "N", "AH", "L"],
-            "ready": ["R", "EH", "D", "IY"],
-            "for": ["F", "AO", "R"],
-            "deployment": ["D", "IH", "P", "L", "OY", "M", "AH", "N", "T"],
+            "talos": ["T", "EY1", "L", "AA0", "S"],
+            "hephaestus": ["HH", "AH0", "F", "EH1", "S", "T", "AH0", "S"],
         }
+
+        if cmudict_path is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            cmudict_path = os.path.join(script_dir, "cmudict.dict")
+
+        if not os.path.exists(cmudict_path) and auto_download:
+            self._download_cmudict(cmudict_path)
+
+        if os.path.exists(cmudict_path):
+            self._load_cmudict(cmudict_path)
+
         self.digraph_rules = {
             "sh": "SH",
             "ch": "CH",
             "th": "TH",
             "ph": "F",
             "ng": "NG",
-            "ee": "IY",
-            "ea": "IY",
-            "oo": "UW",
-            "ou": "AW",
-            "ow": "OW",
-            "ai": "EY",
-            "ay": "EY",
-            "oi": "OY",
-            "oy": "OY",
-            "er": "ER",
-            "ar": "AA",
-            "or": "AO",
+            "ee": "IY1",
+            "ea": "IY1",
+            "oo": "UW1",
+            "ou": "AW1",
+            "ow": "OW1",
+            "ai": "EY1",
+            "ay": "EY1",
+            "oi": "OY1",
+            "oy": "OY1",
+            "er": "ER0",
+            "ar": "AA1",
+            "or": "AO1",
         }
+
         self.char_rules = {
-            "a": "AE",
-            "e": "EH",
-            "i": "IH",
-            "o": "AA",
-            "u": "AH",
+            "a": "AE1",
+            "e": "EH1",
+            "i": "IH1",
+            "o": "AA1",
+            "u": "AH1",
             "b": "B",
             "c": "K",
             "d": "D",
@@ -211,41 +222,92 @@ class TextToPhonemeEncoder:
             "z": "Z",
         }
 
-        if cmudict_path and os.path.exists(cmudict_path):
-            self._load_cmudict(cmudict_path)
+    def _download_cmudict(self, save_path):
+        """Fetches CMUdict from local 'cmudict' package first, or falls back to GitHub."""
+        try:
+            import cmudict as cmu_pkg
+            entries = cmu_pkg.dict()
+            with open(save_path, 'w', encoding='utf-8') as f:
+                for word, pronunciations in entries.items():
+                    for phones in pronunciations:
+                        f.write(f"{word} {' '.join(phones)}\n")
+            print(f"[G2P] Extracted {len(entries):,} words from local cmudict package.")
+            return
+        except ImportError:
+            pass
+
+        url = "https://githubusercontent.com"
+        print("[G2P] Downloading full 134,000-word CMU Pronouncing Dictionary...")
+        try:
+            urllib.request.urlretrieve(url, save_path)
+            print(f"[G2P] Saved dictionary cache to: {save_path}")
+        except Exception as e:
+            print(f"[G2P] Offline mode active: Could not reach GitHub ({e}).")
 
     def _load_cmudict(self, filepath):
+        """Parses CMUdict entries while preserving 0/1/2 lexical stress markers."""
         loaded_count = 0
-        with open(filepath, "r", encoding="latin-1") as cmudict_file:
-            for line in cmudict_file:
-                if line.startswith(";;;") or not line.strip():
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith(";;;"):
                     continue
-                parts = line.strip().split()
+                line = line.split("#", 1)[0].strip()
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
                 word = re.sub(r"\(\d+\)$", "", parts[0]).lower()
-                phones = [re.sub(r"\d", "", phone) for phone in parts[1:]]
+                phones = parts[1:]  # Keep stress markers (e.g., EY1, AH0)
                 if word not in self.lexicon:
                     self.lexicon[word] = phones
                     loaded_count += 1
-        print(f"[G2P] Loaded {loaded_count} words from CMU Dictionary.")
+        print(f"[G2P] Loaded {loaded_count:,} words with lexical stress markers.")
+
+    def encode(self, text):
+        clean_text = self.normalize_text(text)
+        tokens = clean_text.split()
+        phoneme_sequence = []
+
+        for i, token in enumerate(tokens):
+            if token.startswith("<") and token.endswith(">"):
+                phoneme_sequence.append(token)
+            elif token in [","]:
+                phoneme_sequence.append(",")
+            elif token in [".", "!", "?"]:
+                phoneme_sequence.append(".")
+            elif token in self.lexicon:
+                phoneme_sequence.extend(self.lexicon[token])
+            else:
+                phoneme_sequence.extend(self._fallback_g2p(token))
+
+            if (
+                i < len(tokens) - 1
+                and tokens[i + 1] not in [",", ".", "!", "?"]
+                and not tokens[i + 1].startswith("<")
+                and not token.startswith("<")
+            ):
+                phoneme_sequence.append(" ")
+
+        ids = [self.phoneme_to_id.get(p, 1) for p in phoneme_sequence]
+        return phoneme_sequence, np.array(ids)
 
     def normalize_text(self, text):
         text = text.lower()
         text = text.replace("t.a.l.o.s", "talos").replace("t.a.l.o.s.", "talos")
 
         tags = []
+
         def _stash_tag(match):
             tags.append(match.group(0))
-            return f"__TAG{len(tags) - 1}__"
+            return f"__tag{len(tags) - 1}__"
 
-        text = re.sub(r'<(pause=\d+ms|pitch=\d+)>', _stash_tag, text)
+        text = re.sub(r"<(pause=\d+(?:ms)?|pitch=\d+)>", _stash_tag, text)
         text = re.sub(r"([,.!?])", r" \1 ", text)
-        return re.sub(r"[^a-z0-9_.,!? \s]", "", text)
-
+        text = re.sub(r"[^a-z0-9_.,!? \s]", "", text)
         for idx, tag in enumerate(tags):
-            text = text.replace(f"__tag{idx}__",tag)
-
+            text = text.replace(f"__tag{idx}__", tag)
         return text.strip()
-    
+
     def _fallback_g2p(self, word):
         phones = []
         index = 0
@@ -259,378 +321,468 @@ class TextToPhonemeEncoder:
                 index += 1
         return phones
 
-    def encode(self, text):
-        clean_text = self.normalize_text(text)
-        tokens = clean_text.split()
-        phoneme_sequence = []
 
-        for i, token in enumerate(tokens):
-            if token.startswith('<') and token.endswith('>'):
-                phoneme_sequence.append(token)
-            elif token in [',']:
-                phoneme_sequence.append(",")
-            elif token in (".", "!", "?"):
-                phoneme_sequence.append(".")
-            elif token in self.lexicon:
-                phoneme_sequence.extend(self.lexicon[token])
-            else:
-                phoneme_sequence.extend(self._fallback_g2p(token))
-
-            if i < len(tokens) - 1
-                and tokens[i + 1] not in [',','.','!','?'] 
-                and not tokens[i].startswith('<'):
-                phoneme_sequence.append(" ")
-                
-
-        ids = [self.phoneme_to_id.get(p, 1) for p in phoneme_sequence]
-        return phoneme_sequence, np.array(ids)
-
-
-class FormantSpectrogramGenerator:
-    def __init__(self, sample_rate=22050, n_mels=80, voice_profile=None):
+class TimeDomainFormantPlanner:
+    """
+    Converts stressed phoneme sequences into smooth, continuous vocal-tract
+    control trajectories (F0 pitch, F1/F2/F3 formants, bandwidths, and noise)
+    for direct time-domain synthesis without Griffin-Lim phase distortion.
+    """
+    def __init__(self, sample_rate=22050, frame_ms=5.0, voice_profile=None):
         self.sr = sample_rate
-        self.n_mels = n_mels
-        self.profile = voice_profile or VoiceProfile()
+        self.frame_ms = frame_ms
+        self.samples_per_frame = int(round((frame_ms / 1000.0) * sample_rate))
+        self.profile = voice_profile if voice_profile else VoiceProfile()
 
-        min_mel = 2595.0 * np.log10(1.0)
-        max_mel = 2595.0 * np.log10(1.0 + (self.sr / 2.0) / 700.0)
-        mels = np.linspace(min_mel, max_mel, self.n_mels)
-        self.bin_freqs = 700.0 * (10.0 ** (mels / 2595.0) - 1.0)
-
+        # (F1_Hz, F2_Hz, F3_Hz, Voiced_Gain, Noise_Gain, Fric_Center_Hz, Fric_BW_Hz, Base_MS)
         self.phoneme_physics = {
-            " ": (0, 0, 0, 0.0, 0.0, 6),
-            ",": (0, 0, 0, 0.0, 0.0, 16),
-            ".": (0, 0, 0, 0.0, 0.0, 24),
-            "AA": (730, 1090, 2440, 1.0, 0.02, 11),
-            "AE": (660, 1720, 2410, 1.0, 0.02, 11),
-            "AH": (520, 1190, 2390, 1.0, 0.02, 9),
-            "AO": (570, 840, 2410, 1.0, 0.02, 11),
-            "AW": (700, 1000, 2400, 1.0, 0.02, 13),
-            "AY": (700, 1500, 2450, 1.0, 0.02, 13),
-            "EH": (530, 1840, 2480, 1.0, 0.02, 10),
-            "ER": (490, 1350, 1690, 1.0, 0.03, 11),
-            "EY": (450, 2100, 2650, 1.0, 0.02, 12),
-            "IH": (390, 1990, 2550, 1.0, 0.02, 9),
-            "IY": (270, 2290, 3010, 1.0, 0.02, 11),
-            "OW": (450, 800, 2400, 1.0, 0.02, 12),
-            "OY": (500, 900, 2400, 1.0, 0.02, 13),
-            "UH": (440, 1020, 2240, 1.0, 0.02, 9),
-            "UW": (300, 870, 2240, 1.0, 0.02, 11),
-            "L": (350, 1050, 2400, 0.8, 0.02, 7),
-            "M": (280, 900, 2200, 0.7, 0.01, 8),
-            "N": (280, 1400, 2200, 0.7, 0.01, 8),
-            "NG": (280, 1900, 2300, 0.7, 0.01, 8),
-            "R": (420, 1300, 1600, 0.8, 0.02, 7),
-            "W": (300, 610, 2200, 0.8, 0.01, 7),
-            "Y": (280, 2100, 2800, 0.8, 0.01, 7),
-            "S": (0, 0, 5500, 0.0, 0.85, 9),
-            "SH": (0, 0, 3200, 0.0, 0.85, 9),
-            "Z": (250, 1500, 5200, 0.5, 0.70, 8),
-            "ZH": (250, 1500, 3000, 0.5, 0.70, 8),
-            "F": (0, 0, 4500, 0.0, 0.50, 8),
-            "V": (250, 1200, 4200, 0.5, 0.40, 7),
-            "TH": (0, 0, 4800, 0.0, 0.45, 8),
-            "DH": (250, 1300, 4500, 0.5, 0.35, 7),
-            "HH": (500, 1500, 2500, 0.0, 0.55, 7),
-            "P": (0, 0, 1500, 0.0, 0.60, 5),
-            "B": (200, 900, 2000, 0.5, 0.35, 5),
-            "T": (0, 0, 4000, 0.0, 0.75, 5),
-            "D": (200, 1600, 2600, 0.5, 0.40, 5),
-            "K": (0, 0, 2200, 0.0, 0.70, 5),
-            "G": (200, 1800, 2400, 0.5, 0.40, 5),
-            "CH": (0, 0, 3500, 0.0, 0.80, 7),
-            "JH": (250, 1700, 3200, 0.5, 0.65, 7),
+            ' ':  (500,  1500, 2500, 0.0,  0.0,  3000, 1000, 65),
+            ',':  (500,  1500, 2500, 0.0,  0.0,  3000, 1000, 180),
+            '.':  (500,  1500, 2500, 0.0,  0.0,  3000, 1000, 280),
+            # Vowels
+            'AA': (730,  1090, 2440, 1.0,  0.01, 3000, 1200, 125),
+            'AE': (660,  1720, 2410, 1.0,  0.01, 3000, 1200, 125),
+            'AH': (520,  1190, 2390, 1.0,  0.01, 3000, 1200, 100),
+            'AO': (570,  840,  2410, 1.0,  0.01, 3000, 1200, 125),
+            'AW': (700,  1000, 2400, 1.0,  0.01, 3000, 1200, 145),
+            'AY': (700,  1500, 2450, 1.0,  0.01, 3000, 1200, 145),
+            'EH': (530,  1840, 2480, 1.0,  0.01, 3000, 1200, 110),
+            'ER': (490,  1350, 1690, 1.0,  0.02, 2500, 1000, 120),
+            'EY': (450,  2100, 2650, 1.0,  0.01, 3000, 1200, 135),
+            'IH': (390,  1990, 2550, 1.0,  0.01, 3000, 1200, 95),
+            'IY': (270,  2290, 3010, 1.0,  0.01, 3200, 1200, 120),
+            'OW': (450,  800,  2400, 1.0,  0.01, 3000, 1200, 135),
+            'OY': (500,  900,  2400, 1.0,  0.01, 3000, 1200, 145),
+            'UH': (440,  1020, 2240, 1.0,  0.01, 3000, 1200, 95),
+            'UW': (300,  870,  2240, 1.0,  0.01, 3000, 1200, 120),
+            # Nasals & Liquids
+            'L':  (350,  1050, 2400, 0.85, 0.01, 2500, 1000, 75),
+            'M':  (280,  900,  2200, 0.75, 0.00, 2000, 800,  85),
+            'N':  (280,  1400, 2200, 0.75, 0.00, 2200, 800,  85),
+            'NG': (280,  1900, 2300, 0.75, 0.00, 2200, 800,  90),
+            'R':  (420,  1300, 1600, 0.85, 0.01, 2200, 900,  75),
+            'W':  (300,  610,  2200, 0.85, 0.01, 2000, 800,  75),
+            'Y':  (280,  2100, 2800, 0.85, 0.01, 2800, 900,  75),
+            # Fricatives
+            'S':  (400,  1600, 2600, 0.0,  0.55, 5600, 1400, 100),
+            'SH': (400,  1600, 2600, 0.0,  0.55, 3100, 1100, 105),
+            'Z':  (250,  1500, 2600, 0.55, 0.42, 5400, 1400, 90),
+            'ZH': (250,  1500, 2600, 0.55, 0.42, 3000, 1100, 90),
+            'F':  (400,  1400, 2400, 0.0,  0.28, 4600, 2200, 90),
+            'V':  (250,  1200, 2400, 0.55, 0.22, 4200, 2000, 80),
+            'TH': (400,  1400, 2400, 0.0,  0.25, 4800, 2400, 90),
+            'DH': (250,  1300, 2400, 0.55, 0.20, 4400, 2000, 80),
+            'HH': (500,  1500, 2500, 0.0,  0.32, 2200, 1600, 75),
+            # Plosives
+            'P':  (400,  1100, 2100, 0.0,  0.40, 1600, 1200, 65),
+            'B':  (200,  900,  2000, 0.50, 0.25, 1500, 1100, 65),
+            'T':  (400,  1600, 2600, 0.0,  0.50, 4200, 1500, 65),
+            'D':  (200,  1600, 2600, 0.50, 0.30, 3800, 1400, 65),
+            'K':  (400,  1800, 2400, 0.0,  0.45, 2200, 1100, 70),
+            'G':  (200,  1800, 2400, 0.50, 0.28, 2100, 1100, 70),
+            'CH': (400,  1700, 2600, 0.0,  0.55, 3400, 1200, 85),
+            'JH': (250,  1700, 2600, 0.50, 0.42, 3200, 1200, 85),
         }
 
     def forward(self, phoneme_sequence, profile_override=None):
-        profile = profile_override if profile_override else self.profile
-        frames = []
+        prof = profile_override if profile_override else self.profile
+        trajectory = []
 
-        for phone_index, phone in enumerate(phoneme_sequence):
-            f1, f2, f3, voiced_gain, noise_gain, base_duration = (
-                self.phoneme_physics.get(
-                    phone,
-                    (500, 1500, 2500, 0.3, 0.3, 6),
-                )
-            )
+        spoken_tokens = [p for p in phoneme_sequence if not p.startswith('<')]
+        total_spoken = max(1, len(spoken_tokens) - 1)
+        spoken_idx = 0
 
-            if phone in (" ", ",", "."):
-                duration = max(
-                    2,
-                    int(
-                        round(
-                            base_duration
-                            * profile.word_pause_scale
-                            / profile.speech_rate
-                        )
-                    ),
-                )
+        active_base_pitch = prof.base_pitch_hz
+        prev_f1, prev_f2, prev_f3 = 500.0, 1500.0, 2500.0
+
+        for raw_phone in phoneme_sequence:
+            if raw_phone.startswith('<pitch='):
+                active_base_pitch = float(re.findall(r'\d+', raw_phone)[0])
+                continue
+
+            if raw_phone.startswith('<pause='):
+                ms = float(re.findall(r'\d+', raw_phone)[0])
+                n_frames = max(1, int(round(ms / self.frame_ms)))
+                for _ in range(n_frames):
+                    trajectory.append((active_base_pitch, prev_f1, prev_f2, prev_f3, 0.0, 0.0, 3000.0, 1000.0))
+                continue
+
+            stress = None
+            if raw_phone[-1] in ('0', '1', '2'):
+                stress = int(raw_phone[-1])
+                phone = raw_phone[:-1]
             else:
-                duration = max(
-                    2,
-                    int(round(base_duration / profile.speech_rate)),
-                )
+                phone = raw_phone
 
-            f1 *= profile.vocal_tract_scale
-            f2 *= profile.vocal_tract_scale
-            if voiced_gain > 0:
-                f3 *= profile.vocal_tract_scale
-
-            progress = phone_index / max(1, len(phoneme_sequence) - 1)
-            pitch_multiplier = (
-                1.0 + profile.pitch_variance * 0.5 - profile.pitch_variance * progress
-            )
-            harmonics = self._generate_harmonic_comb(
-                profile.base_pitch_hz * pitch_multiplier
+            f1, f2, f3, v_gain, n_gain, fric_hz, fric_bw, base_ms = self.phoneme_physics.get(
+                phone, (500, 1500, 2500, 0.3, 0.2, 3000, 1200, 75)
             )
 
-            for time_index in range(duration):
-                envelope = np.sin(np.pi * (time_index + 0.5) / duration) ** 0.5
-                if phone in ("P", "B", "T", "D", "K", "G"):
-                    envelope = 1.0 if time_index == duration - 1 else 0.05
+            stress_pitch = 1.0
+            stress_dur = 1.0
+            stress_amp = 1.0
+            if stress == 1:
+                stress_pitch, stress_dur, stress_amp = 1.13, 1.24, 1.15
+            elif stress == 2:
+                stress_pitch, stress_dur, stress_amp = 1.05, 1.08, 1.05
+            elif stress == 0:
+                stress_pitch, stress_dur, stress_amp = 0.95, 0.78, 0.85
+                f1 = 0.8 * f1 + 0.2 * 500.0
+                f2 = 0.8 * f2 + 0.2 * 1500.0
 
-                tract_filter = np.zeros(self.n_mels) + 0.02
-                if f1 > 0:
-                    tract_filter += np.exp(-0.5 * ((self.bin_freqs - f1) / 90.0) ** 2)
-                if f2 > 0:
-                    tract_filter += 0.7 * np.exp(
-                        -0.5 * ((self.bin_freqs - f2) / 130.0) ** 2
-                    )
-                if f3 > 0:
-                    tract_filter += 0.4 * np.exp(
-                        -0.5 * ((self.bin_freqs - f3) / 180.0) ** 2
-                    )
+            if phone in [' ', ',', '.']:
+                dur_ms = (base_ms * prof.word_pause_scale) / prof.speech_rate
+            else:
+                dur_ms = (base_ms * stress_dur) / prof.speech_rate
 
-                noise_shape = np.exp(
-                    -0.5 * ((self.bin_freqs - max(2000, f3)) / 1200.0) ** 2
-                )
-                voiced_energy = voiced_gain * harmonics * tract_filter
-                unvoiced_energy = (
-                    noise_gain * noise_shape * (0.7 + 0.3 * np.random.rand(self.n_mels))
-                )
-                total_magnitude = envelope * (voiced_energy + unvoiced_energy) + 1e-4
-                frames.append(np.log(total_magnitude))
+            n_frames = max(2, int(round(dur_ms / self.frame_ms)))
 
-        spectrogram = np.array(frames).T
-        kernel = np.array([0.2, 0.6, 0.2])
-        for mel_index in range(self.n_mels):
-            spectrogram[mel_index] = np.convolve(
-                spectrogram[mel_index],
-                kernel,
-                mode="same",
-            )
-        return spectrogram
+            target_f1 = f1 * prof.vocal_tract_scale
+            target_f2 = f2 * prof.vocal_tract_scale
+            target_f3 = f3 * prof.vocal_tract_scale
+
+            progress = spoken_idx / total_spoken
+            spoken_idx += 1
+            arch = np.sin(np.pi * min(1.0, progress * 1.15)) * (prof.pitch_variance * 0.45)
+            declination = -prof.pitch_variance * 0.65 * progress
+            phrase_pitch = active_base_pitch * (1.0 + arch + declination) * stress_pitch
+
+            for t in range(n_frames):
+                frac = t / max(1, n_frames - 1)
+                # Smooth cosine coarticulation over first 45% of phoneme
+                glide = 0.5 - 0.5 * np.cos(np.pi * min(1.0, frac / 0.45))
+                cur_f1 = (1.0 - glide) * prev_f1 + glide * target_f1
+                cur_f2 = (1.0 - glide) * prev_f2 + glide * target_f2
+                cur_f3 = (1.0 - glide) * prev_f3 + glide * target_f3
+
+                # Plosive closure silence followed by sharp release burst
+                if phone in ['P', 'B', 'T', 'D', 'K', 'G']:
+                    if frac < 0.65:
+                        env = 0.02
+                    elif frac < 0.82:
+                        env = 1.30
+                    else:
+                        env = 0.45
+                else:
+                    env = (np.sin(np.pi * (t + 0.5) / n_frames) ** 0.35) * stress_amp
+
+                syllable_arc = 1.0 + 0.035 * np.sin(np.pi * frac)
+                jitter = 1.0 + np.random.uniform(-prof.pitch_jitter, prof.pitch_jitter)
+                cur_pitch = phrase_pitch * syllable_arc * jitter
+
+                trajectory.append((
+                    cur_pitch,
+                    cur_f1,
+                    cur_f2,
+                    cur_f3,
+                    v_gain * env,
+                    n_gain * env,
+                    fric_hz,
+                    fric_bw
+                ))
+
+            if v_gain > 0:
+                prev_f1, prev_f2, prev_f3 = target_f1, target_f2, target_f3
+
+        return trajectory
 
     def _generate_harmonic_comb(self, pitch_hz):
+        """Models a natural human glottal source with warm -12dB/octave spectral tilt."""
         comb = np.zeros(self.n_mels)
-        for harmonic in range(1, 35):
+        for harmonic in range(1, 45):
             freq = pitch_hz * harmonic
             if freq >= self.sr / 2.0:
                 break
-            amplitude = 1.0 / (harmonic**0.75)
-            comb += amplitude * np.exp(-0.5 * ((self.bin_freqs - freq) / 35.0) ** 2)
+            # Steeper roll-off (-1.15 exponent) creates warm human chest resonance instead of buzz
+            amplitude = 1.0 / (harmonic**1.15)
+            # Boost fundamental (F0) and 2nd harmonic slightly for natural vocal body
+            if harmonic == 1:
+                amplitude *= 1.35
+            elif harmonic == 2:
+                amplitude *= 1.15
+            comb += amplitude * np.exp(-0.5 * ((self.bin_freqs - freq) / 26.0) ** 2)
         return comb
 
 
-class PureMathVocoder:
-    def __init__(
-        self,
-        sample_rate=22050,
-        n_fft=1024,
-        hop_length=256,
-        n_mels=80,
-        force_numpy=False,
-    ):
+class TimeDomainGlottalVocoder:
+    """
+    Pure-Math Direct Time-Domain Formant & Glottal Synthesizer.
+    Eliminates Griffin-Lim phase ringing by generating continuous Rosenberg
+    glottal pulses and filtering them through resonant biquad vocal-tract filters.
+    """
+    def __init__(self, sample_rate=22050, frame_ms=5.0):
         self.sr = sample_rate
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.n_mels = n_mels
-        self.use_scipy = HAS_SCIPY and not force_numpy
-        self.window = np.hanning(self.n_fft)
-        self.mel_basis = self._create_mel_filterbank()
-        self.inv_mel_basis = np.linalg.pinv(self.mel_basis)
+        self.samples_per_frame = int(round((frame_ms / 1000.0) * sample_rate))
 
-    def _hz_to_mel(self, hz):
-        return 2595.0 * np.log10(1.0 + hz / 700.0)
+    def _rosenberg_glottal_wave(self, pitch_track):
+        """
+        Generates a continuous, phase-coherent human glottal flow derivative wave
+        using the biomechanical Rosenberg pulse model (smooth opening, sharp closure).
+        """
+        n_samples = len(pitch_track)
+        # Integrate instantaneous frequency to maintain 100% continuous phase
+        phase = np.cumsum(pitch_track / self.sr) % 1.0
 
-    def _mel_to_hz(self, mel):
-        return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+        # Rosenberg glottal pulse parameters: Oq = open quotient (0.62), Sq = speed quotient
+        tp = 0.42  # Peak glottal opening phase
+        tn = 0.62  # Glottal closure phase
 
-    def _create_mel_filterbank(self):
-        min_mel = self._hz_to_mel(0)
-        max_mel = self._hz_to_mel(self.sr / 2.0)
-        mels = np.linspace(min_mel, max_mel, self.n_mels + 2)
-        hz_points = self._mel_to_hz(mels)
-        bin_points = np.floor((self.n_fft + 1) * hz_points / self.sr).astype(int)
-        bin_points = np.clip(bin_points, 0, self.n_fft // 2)
+        pulse = np.zeros(n_samples)
+        open_mask = phase < tp
+        close_mask = (phase >= tp) & (phase < tn)
 
-        filters = np.zeros((self.n_mels, int(self.n_fft // 2 + 1)))
-        for mel_index in range(1, self.n_mels + 1):
-            left = bin_points[mel_index - 1]
-            center = bin_points[mel_index]
-            right = bin_points[mel_index + 1]
-            if center > left:
-                for bin_index in range(left, center):
-                    filters[mel_index - 1, bin_index] = (bin_index - left) / (
-                        center - left
-                    )
-            if right > center:
-                for bin_index in range(center, right):
-                    filters[mel_index - 1, bin_index] = (right - bin_index) / (
-                        right - center
-                    )
-        return filters
+        # Smooth polynomial glottal opening and closing derivative
+        p_open = phase[open_mask] / tp
+        pulse[open_mask] = 3.0 * (p_open ** 2) - 2.0 * (p_open ** 3)
 
-    def _stft(self, audio):
-        if self.use_scipy:
-            _, _, stft_matrix = scipy.signal.stft(
-                audio,
-                fs=self.sr,
-                window=self.window,
-                nperseg=self.n_fft,
-                noverlap=self.n_fft - self.hop_length,
-            )
-            return stft_matrix
+        p_close = (phase[close_mask] - tp) / (tn - tp)
+        pulse[close_mask] = 1.0 - (p_close ** 2)
 
-        pad_len = self.n_fft // 2
-        padded_audio = np.pad(
-            audio,
-            (pad_len, pad_len),
-            mode="reflect",
-        )
-        num_frames = 1 + (len(padded_audio) - self.n_fft) // self.hop_length
-        stft_matrix = np.zeros(
-            (self.n_fft // 2 + 1, num_frames),
-            dtype=np.complex128,
-        )
-        for frame_index in range(num_frames):
-            start = frame_index * self.hop_length
-            frame = padded_audio[start : start + self.n_fft] * self.window
-            stft_matrix[:, frame_index] = np.fft.rfft(frame)
-        return stft_matrix
+        # Differentiate glottal volume velocity to model lip radiation (+6dB/oct)
+        glottal_source = np.diff(pulse, prepend=0.0)
+        # Soft low-pass smoothing to give warm human chest tone
+        glottal_source = np.convolve(glottal_source, np.array([0.25, 0.5, 0.25]), mode='same')
+        return glottal_source
 
-    def _istft(self, stft_matrix):
-        if self.use_scipy:
-            _, audio = scipy.signal.istft(
-                stft_matrix,
-                fs=self.sr,
-                window=self.window,
-                nperseg=self.n_fft,
-                noverlap=self.n_fft - self.hop_length,
-            )
-            return audio
+    def _apply_time_varying_resonator(self, signal, freq_track, bandwidth_hz, gain=1.0):
+        """
+        Second-order digital resonator (biquad bandpass) with frame-by-frame
+        coefficient updates for smooth, natural vocal-tract formant shaping.
+        """
+        n_samples = len(signal)
+        out = np.zeros(n_samples)
+        step = self.samples_per_frame
 
-        num_frames = stft_matrix.shape[1]
-        expected_len = self.n_fft + self.hop_length * (num_frames - 1)
-        audio = np.zeros(expected_len)
-        window_sum = np.zeros(expected_len)
+        r = np.exp(-np.pi * bandwidth_hz / self.sr)
+        r2 = r * r
+        scale = (1.0 - r2) * 0.5
 
-        for frame_index in range(num_frames):
-            start = frame_index * self.hop_length
-            frame = np.fft.irfft(
-                stft_matrix[:, frame_index],
-                n=self.n_fft,
-            )
-            audio[start : start + self.n_fft] += frame * self.window
-            window_sum[start : start + self.n_fft] += self.window**2
+        y1 = 0.0
+        y2 = 0.0
 
-        nonzero = window_sum > 1e-8
-        audio[nonzero] /= window_sum[nonzero]
-        pad_len = self.n_fft // 2
-        return audio[pad_len:-pad_len]
+        for start in range(0, n_samples, step):
+            end = min(start + step, n_samples)
+            f0 = freq_track[start]
+            if f0 <= 50.0:
+                continue
+            a1 = 2.0 * r * np.cos(2.0 * np.pi * f0 / self.sr)
 
-    def griffin_lim(self, log_mel_spec, n_iter=48):
-        mel_spec = np.exp(log_mel_spec)
-        linear_spec = np.maximum(
-            1e-10,
-            np.dot(self.inv_mel_basis, mel_spec),
-        )
-        angles = np.exp(2j * np.pi * np.random.rand(*linear_spec.shape))
-        complex_spec = linear_spec * angles
+            for i in range(start, end):
+                y0 = scale * signal[i] + a1 * y1 - r2 * y2
+                out[i] = y0
+                y2 = y1
+                y1 = y0
 
-        for _ in range(n_iter):
-            audio = self._istft(complex_spec)
-            stft_matrix = self._stft(audio)
-            min_frames = min(
-                linear_spec.shape[1],
-                stft_matrix.shape[1],
-            )
-            stft_matrix = stft_matrix[:, :min_frames]
-            target_magnitude = linear_spec[:, :min_frames]
-            angles = np.exp(1j * np.angle(stft_matrix))
-            complex_spec = target_magnitude * angles
+        return out * gain
 
-        final_audio = self._istft(complex_spec)
-        peak = np.max(np.abs(final_audio))
-        if peak > 0:
-            final_audio = final_audio / (peak + 1e-8)
-        return final_audio
+    def synthesize(self, trajectory, breathiness=0.14):
+        """Renders frame trajectory directly into a natural 22.05kHz audio waveform."""
+        if not trajectory:
+            return np.zeros(self.sr // 10)
+
+        step = self.samples_per_frame
+        n_frames = len(trajectory)
+        n_samples = n_frames * step
+
+        # Expand frame parameters to sample-level arrays
+        pitch_track = np.repeat([f[0] for f in trajectory], step)
+        f1_track = np.repeat([f[1] for f in trajectory], step)
+        f2_track = np.repeat([f[2] for f in trajectory], step)
+        f3_track = np.repeat([f[3] for f in trajectory], step)
+        v_gain_track = np.repeat([f[4] for f in trajectory], step)
+        n_gain_track = np.repeat([f[5] for f in trajectory], step)
+        fric_hz_track = np.repeat([f[6] for f in trajectory], step)
+
+        # 1. Generate continuous glottal source + aspiration breathiness
+        glottal = self._rosenberg_glottal_wave(pitch_track)
+        glottal /= (np.max(np.abs(glottal)) + 1e-8)
+
+        white_noise = np.random.normal(0.0, 0.35, n_samples)
+        # Modulate aspiration breathiness with the glottal cycle for realism
+        aspiration = white_noise * breathiness * (0.4 + 0.6 * np.abs(glottal))
+        voiced_excitation = (glottal + aspiration) * v_gain_track
+
+        # 2. Pass voiced source through parallel vocal-tract formant resonators (F1, F2, F3)
+        formant_1 = self._apply_time_varying_resonator(voiced_excitation, f1_track, bandwidth_hz=75.0, gain=1.00)
+        formant_2 = self._apply_time_varying_resonator(voiced_excitation, f2_track, bandwidth_hz=105.0, gain=0.65)
+        formant_3 = self._apply_time_varying_resonator(voiced_excitation, f3_track, bandwidth_hz=150.0, gain=0.35)
+        voiced_speech = formant_1 + formant_2 + formant_3
+
+        # 3. Shape unvoiced consonant frication (S, SH, F, TH, T, K bursts)
+        fric_excitation = white_noise * n_gain_track
+        unvoiced_speech = self._apply_time_varying_resonator(fric_excitation, fric_hz_track, bandwidth_hz=950.0, gain=1.15)
+
+        waveform = voiced_speech + unvoiced_speech
+        # Gentle high-frequency warmth filter + normalization
+        waveform = np.convolve(waveform, np.array([0.15, 0.70, 0.15]), mode='same')
+        peak = np.max(np.abs(waveform))
+        if peak > 1e-8:
+            waveform = (waveform / peak) * 0.92
+        return waveform
 
     def _to_wav_bytes(self, waveform):
         pcm_data = np.int16(waveform * 32767)
-        buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(self.sr)
-            wav_file.writeframes(pcm_data.tobytes())
-        return buffer.getvalue()
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self.sr)
+            wf.writeframes(pcm_data.tobytes())
+        return buf.getvalue()
 
     def save_wav(self, filename, waveform):
-        with open(filename, "wb") as wav_file:
-            wav_file.write(self._to_wav_bytes(waveform))
+        with open(filename, 'wb') as f:
+            f.write(self._to_wav_bytes(waveform))
 
     def speak_realtime(self, waveform, async_play=False):
         if not HAS_WINSOUND:
-            print(
-                "[Audio] winsound is only available on Windows. "
-                "Use save_wav() instead."
-            )
+            print("[Audio] winsound is only available on Windows. Use save_wav() instead.")
             return
-
         wav_bytes = self._to_wav_bytes(waveform)
-        flags = winsound.SND_MEMORY
-        if async_play:
-            flags |= winsound.SND_ASYNC
+        flags = winsound.SND_MEMORY | (winsound.SND_ASYNC if async_play else 0)
         winsound.PlaySound(wav_bytes, flags)
+                
+class TalosDSPChain:
+    """Applies sci-fi AI vocal textures using pure-NumPy signal processing."""
+    def __init__(self, sample_rate=22050):
+        self.sr = sample_rate
 
+    def _apply_ring_mod(self, audio, freq_hz, mix):
+        if freq_hz <= 0 or mix <= 0:
+            return audio
+        t = np.arange(len(audio)) / self.sr
+        carrier = np.sin(2.0 * np.pi * freq_hz * t)
+        modulated = audio * carrier
+        return (1.0 - mix) * audio + mix * modulated
+
+    def _apply_chorus(self, audio, mix):
+        if mix <= 0:
+            return audio
+        n = len(audio)
+        t = np.arange(n) / self.sr
+        indices = np.arange(n, dtype=np.float64)
+
+        delay1 = (0.012 + 0.002 * np.sin(2.0 * np.pi * 1.4 * t)) * self.sr
+        delay2 = (0.021 + 0.003 * np.sin(2.0 * np.pi * 0.9 * t + 1.5)) * self.sr
+
+        tap1 = np.interp(np.clip(indices - delay1, 0, n - 1), indices, audio)
+        tap2 = np.interp(np.clip(indices - delay2, 0, n - 1), indices, audio)
+
+        wet = 0.5 * (tap1 + tap2)
+        return (1.0 - mix) * audio + mix * wet
+
+    def _apply_radio_bandpass(self, audio, low_hz=300.0, high_hz=3800.0):
+        spectrum = np.fft.rfft(audio)
+        freqs = np.fft.rfftfreq(len(audio), d=1.0 / self.sr)
+
+        mask = np.ones_like(freqs)
+        mask[freqs < low_hz] = np.exp(-((low_hz - freqs[freqs < low_hz]) / 80.0) ** 2)
+        mask[freqs > high_hz] = np.exp(-((freqs[freqs > high_hz] - high_hz) / 250.0) ** 2)
+
+        filtered = np.fft.irfft(spectrum * mask, n=len(audio))
+        return np.tanh(filtered * 1.5)
+
+    def _apply_room_ambience(self, audio, mix):
+        if mix <= 0:
+            return audio
+        delays_ms = [18.0, 31.0, 47.0]
+        gains = [0.35, 0.22, 0.12]
+        wet = np.zeros_like(audio)
+        for d_ms, g in zip(delays_ms, gains):
+            shift = int((d_ms / 1000.0) * self.sr)
+            if shift < len(audio):
+                wet[shift:] += g * audio[:-shift]
+        wet = np.convolve(wet, np.array([0.25, 0.5, 0.25]), mode='same')
+        return (1.0 - mix) * audio + mix * (audio + wet)
+
+    def process(self, waveform, profile):
+        out = waveform.copy()
+        out = self._apply_ring_mod(out, profile.ring_mod_hz, profile.ring_mod_mix)
+        out = self._apply_chorus(out, profile.chorus_mix)
+        out = self._apply_room_ambience(out, getattr(profile, 'room_ambience', 0.15))
+        if profile.bandpass_comms:
+            out = self._apply_radio_bandpass(out)
+
+        peak = np.max(np.abs(out))
+        if peak > 1e-8:
+            out = (out / peak) * 0.95
+        return out
 
 class TalosTTS:
-    def __init__(self, voice_profile=None, cmudict_path=None, force_numpy=False):
+    def __init__(self, voice_profile=None, cmudict_path=None):
         self.profile = voice_profile if voice_profile else VoiceProfile.presets()["command"]
         self.g2p = TextToPhonemeEncoder(cmudict_path=cmudict_path)
-        self.acoustic = FormantSpectrogramGenerator(voice_profile=self.profile)
-        self.vocoder = PureMathVocoder(force_numpy=force_numpy)
+        self.acoustic = TimeDomainFormantPlanner(voice_profile=self.profile)
+        self.vocoder = TimeDomainGlottalVocoder()
         self.dsp = TalosDSPChain(sample_rate=self.vocoder.sr)
+        
+        self._speech_queue = queue.Queue()
+        self._worker_thread = threading.Thread(target=self._queue_worker, daemon=True)
+        self._worker_thread.start()
+
+    def _synthesize(self, text, active_profile):
+        phonemes, _ = self.g2p.encode(text)
+        trajectory = self.acoustic.forward(phonemes, profile_override=active_profile)
+        raw_waveform = self.vocoder.synthesize(trajectory, breathiness=active_profile.breathiness)
+        return self.dsp.process(raw_waveform, active_profile)
+    
+    def _queue_worker(self):
+        """Continuously processes queued speech tasks one by one in order."""
+        while True:
+            text, profile, save_path, play_audio = self._speech_queue.get()
+            try:
+                waveform = self._synthesize(text, profile)
+                if save_path:
+                    self.vocoder.save_wav(save_path, waveform)
+                if play_audio:
+                    # Blocking play inside worker thread guarantees zero audio overlap
+                    self.vocoder.speak_realtime(waveform, async_play=False)
+            finally:
+                self._speech_queue.task_done()
 
     def say(self, text, profile=None, save_path=None, play_audio=True):
+        """Blocking call: synthesizes and speaks immediately on the calling thread."""
         active_profile = profile if profile else self.profile
-        phonemes, _ = self.g2p.encode(text)
-        mel_spec = self.acoustic.forward(phonemes, profile_override=active_profile)
-        raw_waveform = self.vocoder.griffin_lim(mel_spec, n_iter=48)
-        
-        # Apply post-processing DSP effects chain
-        waveform = self.dsp.process(raw_waveform, active_profile)
-        
+        waveform = self._synthesize(text, active_profile)
         if save_path:
             self.vocoder.save_wav(save_path, waveform)
         if play_audio:
-            self.vocoder.speak_realtime(waveform)
-            
+            self.vocoder.speak_realtime(waveform, async_play=False)
         return waveform
 
+    def speak_async(self, text, profile=None, save_path=None, play_audio=True):
+        """Non-blocking call: queues text for background speech without halting T.A.L.O.S."""
+        active_profile = profile if profile else self.profile
+        self._speech_queue.put((text, active_profile, save_path, play_audio))
+
+    def wait_until_done(self):
+        """Blocks until all queued speech announcements finish playing."""
+        self._speech_queue.join()
+
+
+# =====================================================================
+# PIPELINE EXECUTION
+# =====================================================================
 
 if __name__ == "__main__":
     tts = TalosTTS()
     presets = VoiceProfile.presets()
 
-    print(f"Speaking with: {presets['command'].name}")
-    tts.say(
-        "Talos project hephaestus. All systems operational.",
+    print("[T.A.L.O.S.] Queuing startup announcements...")
+    tts.speak_async(
+        "Talos project hephaestus. <pause=400> All systems operational.",
         profile=presets["command"],
         save_path="talos_command.wav",
         play_audio=True,
     )
+    tts.speak_async(
+        "<pitch=80> Warning. <pitch=115> Tactial comms link active.",
+        profile=presets["tactical"],
+    )
+
+    print("[T.A.L.O.S.] Main OS loop unblocked while speaking!")
+    tts.wait_until_done()
+    print("[T.A.L.O.S.] Speech queue complete.")
 
     custom_voice = VoiceProfile(
         name="T.A.L.O.S. Custom Override",
